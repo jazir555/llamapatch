@@ -703,6 +703,33 @@ with tempfile.TemporaryDirectory() as td:
           lab.state["bench_results"]["77"]["runs"] == [33.5],
           str(lab.state["bench_results"].get("77")))
 
+# 41. final-verify confirms boundary readings before reverting a culprit
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.bench = _scripted([33.5, 40.0])  # boundary, then clean: noise, not guilt
+    lab.state["merged"] = [71, 72]
+    st, _ = lab.final_verify_and_heal([71, 72])
+    check("final-confirm-saves", st == "clean", st)
+    check("final-confirm-no-revert", lab.state["merged"] == [71, 72],
+          str(lab.state["merged"]))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.bench = _scripted([30.0, 31.0])  # real regression, twice
+    lab.state["merged"] = [71, 72]
+    st, _ = lab.final_verify_and_heal([72])
+    check("final-confirm-upholds", st == "healed", st)
+    check("final-confirm-reverts", lab.state["merged"] == [71],
+          str(lab.state["merged"]))
+    check("final-confirm-runs",
+          any("runs=" in q.get("detail", "") for q in lab.quar
+              if q.get("reason") == "late-regression"),
+          str(lab.quar))
+
 # 23. quarantine dedup (retry cycles must not grow the file unboundedly)
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)

@@ -648,6 +648,31 @@ class Lab:
             return False, f"ppl {val} > threshold {self.a.ppl_threshold}\n{out[-800:]}"
         return True, f"ppl {val}"
 
+    def maybe_confirm_bench(self, n, intent, base, val):
+        """One confirmation run when val is a boundary measurement.
+
+        Returns (val, runs): the verdict value (mean of both runs when
+        confirmed) and the run list for forensics. A flaked confirmation
+        keeps the first run — extra data only overrides when collected.
+        """
+        runs = [val]
+        if not needs_confirm(intent, base, val, self.a.regression_pct,
+                             getattr(self.a, "bench_noise_pct", 5.0)):
+            return val, runs
+        self.log(event="bench-confirm", pr=n, first=val, base=base)
+        try:
+            ok2, val2, bout2 = self.bench()
+        except Exception as e:
+            self.log(event="bench-confirm-flake", pr=n, detail=str(e)[-300:])
+            return val, runs
+        if ok2 and val2 is not None:
+            val = (val + val2) / 2
+            runs.append(val2)
+            self.log(event="bench-confirmed", pr=n, runs=runs, mean=val)
+        else:
+            self.log(event="bench-confirm-flake", pr=n, detail=str(bout2)[-300:])
+        return val, runs
+
     def run_gates(self, n, intent):
         """Build/smoke/ppl/bench gates for one merged commit.
 
@@ -709,27 +734,7 @@ class Lab:
                          total=len(self.state["merged"]))
                 return True
             base = self.state.get("bench_baseline")
-            runs = [val]
-            if needs_confirm(intent, base, val, self.a.regression_pct,
-                             getattr(self.a, "bench_noise_pct", 5.0)):
-                # Boundary measurement: one confirmation run, verdict on the
-                # mean (halves the noise). A flaked confirm keeps the first
-                # run's verdict — extra data only overrides when collected.
-                self.log(event="bench-confirm", pr=n, first=val, base=base)
-                try:
-                    ok2, val2, bout2 = self.bench()
-                except Exception as e:
-                    self.log(event="bench-confirm-flake", pr=n,
-                             detail=str(e)[-300:])
-                else:
-                    if ok2 and val2 is not None:
-                        runs.append(val2)
-                        val = sum(runs) / len(runs)
-                        self.log(event="bench-confirmed", pr=n, runs=runs,
-                                 mean=val)
-                    else:
-                        self.log(event="bench-confirm-flake", pr=n,
-                                 detail=str(bout2)[-300:])
+            val, runs = self.maybe_confirm_bench(n, intent, base, val)
             verdict = verdict_for(intent, base, val, self.a.regression_pct)
             br = self.state.setdefault("bench_results", {})
             br[str(n)] = {"tg": val, "base": base, "verdict": verdict,
@@ -940,12 +945,18 @@ class Lab:
                     self.log(event="final-bench-flake", detail=str(bout)[-1000:])
                     return ("healed" if steps else "unverified"), "bench unparsed"
                 base = self.state["bench_baseline"]
+                # Same noise guard as per-PR gates: a boundary final reading
+                # must not revert a culprit on one noisy number. Intent is
+                # empty here — only the regression side can trigger, which
+                # is exactly this gate's guilty verdict.
+                val, runs = self.maybe_confirm_bench("final", {}, base, val)
                 if val < base * (1 - self.a.regression_pct / 100):
                     culprit = remaining.pop()
                     self.revert_last()
                     self._drop_merged(culprit)
                     self._mark_late(culprit, "late-regression")
-                    self.quarantine(culprit, "late-regression", f"{val} vs {base}")
+                    self.quarantine(culprit, "late-regression",
+                                    f"{val} vs {base} runs={runs}")
                     self.log(event="late-heal", pr=culprit, gate="bench",
                              val=val, base=base)
                     steps += 1
