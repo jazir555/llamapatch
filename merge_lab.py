@@ -57,25 +57,48 @@ def parse_bench_output(out):
 
     Handles: JSON list, {"results": [...]}, log-prefixed JSON, trailing
     non-JSON lines, and regex fallbacks ("avg_throughput"/tok-s).
-    tg row = dict with n_gen>0 and avg_ts.
+    tg row = dict with n_gen>0 and a throughput metric (avg_ts,
+    avg_throughput, or throughput).
+
+    The scan tries every "[" candidate: newer llama-bench rows embed
+    samples_ns/samples_ts arrays, so the LAST "[" sits inside a row and
+    no longer opens the result list.
     """
     val = None
     try:
-        start = out.rfind("[")
         obj = None
-        if start >= 0:
-            try:
-                obj = json.loads(out[start:])
-            except Exception:
-                end = out.rfind("]")
-                if end > start:
-                    obj = json.loads(out[start:end + 1])
+        starts, pos = [], 0
+        while True:
+            i = out.find("[", pos)
+            if i < 0:
+                break
+            starts.append(i)
+            pos = i + 1
+        last_close = out.rfind("]")
+        for start in starts:
+            for cand in (out[start:], out[start:last_close + 1] if last_close > start else ""):
+                if not cand:
+                    continue
+                try:
+                    obj = json.loads(cand)
+                except Exception:
+                    continue
+                if isinstance(obj, (list, dict)):
+                    break
+            if isinstance(obj, (list, dict)):
+                break
         rows = obj.get("results", obj) if isinstance(obj, dict) else obj
         if isinstance(rows, list):
             for row in rows:
-                if isinstance(row, dict) and (row.get("n_gen") or 0) > 0 and row.get("avg_ts"):
-                    val = float(row["avg_ts"])
-                    break
+                if not isinstance(row, dict):
+                    continue
+                if (row.get("n_gen") or 0) > 0:
+                    for key in ("avg_ts", "avg_throughput", "throughput"):
+                        if row.get(key):
+                            val = float(row[key])
+                            break
+                    if val is not None:
+                        break
     except Exception:
         val = None
     if val is None:
@@ -528,9 +551,11 @@ class Lab:
         # llama-bench -o json emits a list (or {"results": [...]});
         # tg entry has n_gen>0, metric is avg_ts. Falls back to regexes.
         # Writes last-bench.txt for forensics; caller decides pass/fail.
+        # tail -300 (not -80): new-schema rows carry samples_* arrays and
+        # run ~60 lines each; a short tail cut the list's opening bracket.
         bench = os.path.join(self.repo, "build", "bin", "llama-bench")
         model = os.path.expanduser(self.a.bench_model)
-        rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -80", self.repo)
+        rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -300", self.repo)
         val = parse_bench_output(out)
         try:
             with open(os.path.join(self.a.state_dir, "last-bench.txt"), "w") as f:

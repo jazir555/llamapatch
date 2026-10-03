@@ -26,6 +26,17 @@ check("bench-log-prefix", M.parse_bench_output('build ok\n[{"n_gen":128,"avg_ts"
 check("bench-trailing-line", M.parse_bench_output('[{"n_gen":32,"avg_ts":40.0}]\nsummary done') == 40.0)
 check("bench-regex-fallback", M.parse_bench_output('speed: 160.39 tok/s') == 160.39)
 check("bench-none", M.parse_bench_output('no numbers here') is None)
+# new llama-bench schema (Oct 2026): rows embed samples_ns/samples_ts
+# arrays, so the last "[" is inside a row, not the list opener.
+_new_schema = ('[{"n_prompt":32,"n_gen":0,"avg_ts":23.19,'
+               '"samples_ns":[1429603469,1409326872],"samples_ts":[22.38,22.71]},'
+               '{"n_prompt":32,"n_gen":32,"avg_ts":18.44,'
+               '"samples_ns":[1735234567,1741234567],"samples_ts":[18.41,18.47]}]')
+check("bench-samples-arrays", M.parse_bench_output(_new_schema) == 18.44)
+check("bench-samples-log-prefix",
+      M.parse_bench_output('build: abc1234\n' + _new_schema + '\ntail line') == 18.44)
+check("bench-samples-alt-key",
+      M.parse_bench_output('[{"n_gen":32,"avg_throughput":19.5,"samples_ts":[19.1]}]') == 19.5)
 
 # 2. smoke verdict
 check("smoke-tg", M.smoke_ok(0, "tg32 : 42 t/s"))
