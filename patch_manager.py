@@ -54,7 +54,8 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <h1>llamapatch manager</h1>
 <div class="row"><label>Upstream slug <input id="slug" type="text" value="ggml-org/llama.cpp"></label></div>
 <div class="row"><label>Checkout (repo) <input id="repo" type="text" placeholder="/home/user/llama-pr-lab/llama.cpp"></label>
-<label>Base <input id="base" type="text" value="master" style="width:8em"></label></div>
+<label>Base <input id="base" type="text" value="master" style="width:8em" list="refs"></label>
+<datalist id="refs"></datalist><button onclick="versions()">Versions</button></div>
 <div class="row"><label>Candidates file <input id="cands" type="text" value="candidates-1k.json"></label>
 <label>State dir <input id="statedir" type="text" value="" placeholder="(default: alongside candidates)"></label>
 <button onclick="load()">Load</button></div>
@@ -73,6 +74,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 let RUN=null, TIMER=null;
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
 async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();for(const c of d.candidates){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number}</td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.verdict||''}</td><td>${c.status}</td>`;tb.appendChild(tr)}}
+async function versions(){const q=new URLSearchParams({repo:val('repo')});const d=await api('/api/refs?'+q);const dl=document.getElementById('refs');dl.innerHTML='';for(const b of [...(d.branches||[]),...(d.tags||[])]){const o=document.createElement('option');o.value=b;dl.appendChild(o)}}
 function selKey(){return 'llamapatch-sel:'+val('cands')}
 function savedChecks(){try{const s=JSON.parse(localStorage.getItem(selKey())||'null');return Array.isArray(s)?new Set(s):null}catch(e){return null}}
 function saveChecks(){try{localStorage.setItem(selKey(),JSON.stringify(selected()))}catch(e){}}
@@ -159,6 +161,49 @@ class PatchApp:
     def default_state_dir(self, candidates):
         d = os.path.dirname(os.path.abspath(candidates))
         return os.path.join(d, "state")
+
+    @staticmethod
+    def git_refs(repo):
+        """Branches + recent tags + HEAD for the version picker. All errors
+        become messages: a bad path must explain itself, not 500."""
+        if not repo:
+            return None, "repo checkout path required"
+        if not os.path.isdir(repo):
+            return None, f"repo dir missing: {repo}"
+        def _run(args):
+            try:
+                p = subprocess.run(["git", "-C", repo] + args,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True,
+                                   timeout=60)
+            except Exception as e:
+                return None
+            if p.returncode != 0:
+                return None
+            return [l.strip() for l in (p.stdout or "").splitlines()
+                    if l.strip()]
+        branches = _run(["branch", "--format=%(refname:short)"])
+        if branches is None:
+            return None, f"not a git repo: {repo}"
+        tags = _run(["tag", "--sort=-creatordate"]) or []
+        head = _run(["rev-parse", "--short", "HEAD"]) or [""]
+        return {"branches": branches[:100], "tags": tags[:50],
+                "head": head[0]}, None
+
+    @staticmethod
+    def verify_ref(repo, ref):
+        """True when ref resolves in the checkout (fail fast on typos
+        before a multi-hour merge run starts)."""
+        if not repo or not ref:
+            return False
+        try:
+            p = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                                ref], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True,
+                               timeout=60)
+        except Exception:
+            return False
+        return p.returncode == 0
 
     # -- runs -----------------------------------------------------------
     def start_run(self, kind, cmd, log_path, env=None, state_dir=""):
@@ -381,6 +426,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return _json(self, 500, {"error": f"report failed: {e}"})
             return _text(self, 200, rep, "text/markdown; charset=utf-8")
+        if u.path == "/api/refs":
+            info, err = self.app.git_refs(q.get("repo", ""))
+            if err:
+                return _json(self, 400, {"error": err})
+            return _json(self, 200, info)
         return _json(self, 404, {"error": "unknown path"})
 
     def do_POST(self):
@@ -446,6 +496,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not repo:
             return _json(self, 400, {"error": "repo checkout path required"})
         base = (body.get("base") or "master").strip() or "master"
+        if not body.get("dry_run") and not self.app.verify_ref(repo, base):
+            return _json(self, 400,
+                         {"error": f"base ref {base!r} not found in {repo}"})
         nums = body.get("numbers", [])
         if not nums:
             return _json(self, 400, {"error": "no PRs selected"})

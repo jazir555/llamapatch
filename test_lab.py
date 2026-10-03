@@ -1967,7 +1967,7 @@ try:
                           + "&state_dir=" + _up60.quote(sd60))
         check("gui-report", st == 200 and "llamapatch report" in body, body[:150])
 finally:
-    pass  # server stays up for section 61; shut down at file end
+    pass  # server stays up for sections 61+; shut down at file end
 
 # 61. run cancel kills the tree and only our own stale lock
 st, _ = _post60("/api/runs/999999/cancel", {})
@@ -2092,6 +2092,41 @@ with tempfile.TemporaryDirectory() as td:
         check("preflight-doctor-skips", True)
     except RuntimeError as e:
         check("preflight-doctor-skips", False, str(e)[:200])
+
+# 62. version picker: refs listing + base verification fail fast
+with tempfile.TemporaryDirectory() as td62:
+    repo = os.path.join(td62, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "tag", "v1-test")
+    _git(repo, "checkout", "-b", "stable")
+    st, body = _get60("/api/refs?repo=" + _up60.quote(repo))
+    _r62 = json.loads(body)
+    check("gui-refs", st == 200 and "master" in _r62.get("branches", [])
+          and "stable" in _r62.get("branches", [])
+          and "v1-test" in _r62.get("tags", []) and len(_r62.get("head", "")) >= 7,
+          body[:250])
+    st, _ = _get60("/api/refs?repo=" + _up60.quote(os.path.join(td62, "nope")))
+    check("gui-refs-missing", st == 400, str(st))
+    st, _ = _get60("/api/refs?repo=" + _up60.quote(td62))
+    check("gui-refs-notrepo", st == 400, str(st))
+    cf62 = os.path.join(td62, "c.json")
+    json.dump([{"number": 71, "title": "t"}], open(cf62, "w"))
+    sd62 = os.path.join(td62, "st")
+    before62 = len(PM.Handler.app.runs)
+    st, body = _post60("/api/merge", {"candidates": cf62, "repo": repo,
+                                      "base": "no-such-ref", "numbers": [71]})
+    check("gui-bad-base", st == 400 and "not found" in body, body[:200])
+    check("gui-bad-base-no-spawn",
+          len(PM.Handler.app.runs) == before62
+          and not os.path.exists(os.path.join(sd62, "candidates-selected.json")))
+    st, body = _post60("/api/merge", {"candidates": cf62, "repo": repo,
+                                      "base": "stable", "numbers": [71],
+                                      "dry_run": True})
+    check("gui-good-base-dry", st == 200, f"{st} {body[:150]}")
 
 _srv60.shutdown()
 _srv60.server_close()
