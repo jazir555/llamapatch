@@ -175,11 +175,13 @@ def build_report(state, quar, cands):
     cand_nums = {c.get("number") for c in cands
                  if isinstance(c, dict) and isinstance(c.get("number"), int)}
     pending_n = len(cand_nums - set(merged) - set(state.get("quarantined", []) or []))
+    base_runs = state.get("bench_baseline_runs", []) or []
+    base_runs_s = f" (n={len(base_runs)})" if len(base_runs) > 1 else ""
     L = [f"# llamapatch report",
          f"",
          f"- merged: {len(merged)} | quarantined: {len(state.get('quarantined', []) or [])} | "
          f"pending: {pending_n} | batches: {state.get('batches_done', 0)} | "
-         f"baseline tg: {base} @ {base_sha}",
+         f"baseline tg: {base} @ {base_sha}{base_runs_s}",
          f""]
     late = []
     for q in quar:
@@ -199,10 +201,12 @@ def build_report(state, quar, cands):
         heads = state.get("merged_heads", {}) if isinstance(state.get("merged_heads"), dict) else {}
         for n in merged:
             b = bench.get(str(n), {}) if isinstance(bench, dict) else {}
+            runs = b.get("runs", []) or []
+            runs_s = f" ({len(runs)} runs)" if len(runs) > 1 else ""
             L.append(f"| #{n} | {(titles.get(n, '') or '')[:60]} | {b.get('area', '?')} | "
                      f"{','.join(b.get('backends', []) or []) or '-'} | "
                      f"{b.get('verdict', 'unverified')} | "
-                     f"{b.get('tg', '-')} vs {b.get('base', '-')} | "
+                     f"{b.get('tg', '-')} vs {b.get('base', '-')}{runs_s} | "
                      f"{str(heads.get(str(n), ''))[:8] or '-'} |")
     L.append("")
     L.append("## quarantined")

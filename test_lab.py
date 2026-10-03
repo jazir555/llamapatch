@@ -1299,6 +1299,21 @@ with tempfile.TemporaryDirectory() as td:
     check("report-no-warnings-quiet",
           "## doctor warnings" not in M.build_report({"merged": []}, [], []))
 
+# 48. report surfaces confirmation runs (invisible guards get distrusted)
+_rep48 = M.build_report(
+    {"merged": [7], "bench_baseline": 40.0, "bench_baseline_sha": "abc123",
+     "bench_baseline_runs": [40.0, 44.0],
+     "bench_results": {"7": {"tg": 36.75, "base": 40.0, "verdict": "parity",
+                             "runs": [33.5, 40.0]}}},
+    [], [{"number": 7, "title": "seven"}])
+check("report-runs-row", "36.75 vs 40.0 (2 runs)" in _rep48, _rep48)
+check("report-runs-base", "baseline tg: 40.0 @ abc123 (n=2)" in _rep48, _rep48)
+_rep48s = M.build_report(
+    {"merged": [7], "bench_results": {"7": {"tg": 40.0, "verdict": "parity",
+                                            "runs": [40.0]}}},
+    [], [{"number": 7, "title": "seven"}])
+check("report-runs-single-quiet", "(2 runs)" not in _rep48s and "(n=2)" not in _rep48s)
+
 # 44. fallback without triaged head_full merges (unenriched candidates skip
 # the freshness check instead of blocking on it)
 with tempfile.TemporaryDirectory() as td:
