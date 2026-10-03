@@ -554,13 +554,19 @@ class Lab:
         self.state["batches_done"] += 1
         self.save()
 
+    def base_ref(self):
+        """Log-range base: recorded SHA preferred, CLI base fallback.
+        Never an eager .get default (evaluated even when the key exists,
+        crashing on minimal args)."""
+        return self.state.get("base_sha") or getattr(self.a, "base", "master")
+
     def merge_parents(self):
         """{pr: second-parent SHA} for our merge commits on this branch.
 
         The second parent of a --no-ff merge is the PR head ref exactly as
         merged — the ground truth record_merged()'s SHA must equal. Matches
         both v4 amended messages and legacy v3 default merge messages."""
-        base = self.state.get("base_sha") or getattr(self.a, "base", "master")
+        base = self.base_ref()
         rc, out = self.git(f"log --format=%H%x1f%P%x1f%s {base}..HEAD")
         if rc != 0:
             return {}
@@ -1159,7 +1165,7 @@ class Lab:
         means the branch moved after merge testing (warning only — the
         commit still exists, so no auto-drop)."""
         self.doctor_warnings = []
-        rc, out = self.git(f"log --format=%s {self.state.get('base_sha', self.a.base)}..HEAD")
+        rc, out = self.git(f"log --format=%s {self.base_ref()}..HEAD")
         subjects = out if rc == 0 else ""
         fixed_merged, fixed_quar, requeued = [], [], []
         for n in self.state["merged"]:

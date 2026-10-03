@@ -1344,6 +1344,25 @@ with tempfile.TemporaryDirectory() as td:
     check("save-no-tmp-left", [f for f in os.listdir(sd) if ".tmp-" in f] == [],
           str(os.listdir(sd)))
 
+# 50. base_ref fallback chain (no eager-.get crash on minimal args)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 1}])  # no .base attr on purpose
+    lab = M.Lab(a)
+    check("base-ref-default", lab.base_ref() == "master", lab.base_ref())
+    lab.state["base_sha"] = "abc123"
+    check("base-ref-state", lab.base_ref() == "abc123")
+    a.base = "develop"
+    lab.state["base_sha"] = None
+    check("base-ref-arg", lab.base_ref() == "develop")
+    lab.doctor()  # must not crash on minimal args
+    check("doctor-minimal-args", lab.state["merged"] == [])
+
 # 44. fallback without triaged head_full merges (unenriched candidates skip
 # the freshness check instead of blocking on it)
 with tempfile.TemporaryDirectory() as td:
