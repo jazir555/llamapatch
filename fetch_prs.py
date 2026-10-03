@@ -174,6 +174,18 @@ def main():
     rate_limited = False
     abort_reason = ""
     consec_errors = 0
+    def _note_error(c, msg):
+        # Shared breaker: systematic failure (revoked token, dead API,
+        # proxy) must abort with partial output, not burn hours — whether
+        # it surfaces as HTTPError or anything else.
+        nonlocal consec_errors, abort_reason
+        consec_errors += 1
+        if consec_errors >= 5:
+            print(f"5 consecutive stage-2 errors — aborting triage, "
+                  f"partial output saved next. Last: {msg}")
+            abort_reason = "consecutive-errors"
+            return True
+        return False
     for i, c in enumerate(top):
         n = c["number"]
         try:
@@ -218,18 +230,13 @@ def main():
                 break
             print(f"[{i+1}/{len(top)}] #{n} ERROR {c['error']} (backing off 30s)")
             time.sleep(30)
-            consec_errors += 1
-            if consec_errors >= 5:
-                # Systematic failure (revoked token, dead API, proxy): 200
-                # PRs x 30s sleeps would burn hours. Save partial like the
-                # rate-limit path and let the operator re-run.
-                print(f"5 consecutive stage-2 errors — aborting triage, "
-                      f"partial output saved next. Last: {c['error']}")
-                abort_reason = "consecutive-errors"
+            if _note_error(c, c["error"]):
                 break
         except Exception as e:
             c["error"] = str(e)
             print(f"[{i+1}/{len(top)}] #{n} ERROR {e}")
+            if _note_error(c, c["error"]):
+                break
         time.sleep(a.ci_sleep if token else 2.5)
 
     top.sort(key=lambda x: (-x["score"], x["updated"]))

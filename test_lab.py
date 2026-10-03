@@ -1617,6 +1617,42 @@ try:
 finally:
     sys.argv = _argv53
 
+# 55. review fixes: generic errors trip the breaker, None intent safe,
+# doctor_warnings always defined
+_argv55, _req55, _sleep55 = sys.argv, F.req, F.time.sleep
+F.time.sleep = lambda s: None
+try:
+    with tempfile.TemporaryDirectory() as td55:
+        _out55 = os.path.join(td55, "cands.json")
+        _plist55 = [{"number": 30 + i, "title": f"pr {i}", "body": "",
+                     "user": {"login": "u"}, "updated_at": "2026-01-01T00:00:00Z",
+                     "labels": [], "draft": False, "head": {"sha": "e" * 40}}
+                    for i in range(6)]
+        def _conndead55(url, token, timeout=60):
+            if "state=open" in url:
+                return (list(_plist55), None)
+            raise ConnectionError("proxy down")
+        sys.argv = ["fetch_prs.py", "--limit", "10", "--top", "6",
+                    "--out", _out55, "--ci-sleep", "0"]
+        F.req = _conndead55
+        try:
+            F.main()
+            check("breaker-generic-exits", False, "main must sys.exit(2)")
+        except SystemExit as e:
+            check("breaker-generic-exits", e.code == 2, f"exit={e.code}")
+        _part55 = json.load(open(_out55))
+        check("breaker-generic-partial", len(_part55) == 6
+              and all("error" in c for c in _part55[:5]),
+              str([(c["number"], c.get("error")) for c in _part55]))
+finally:
+    sys.argv, F.req, F.time.sleep = _argv55, _req55, _sleep55
+check("confirm-none-intent-reg", M.needs_confirm(None, 100, 83, 15, 5.0) is True)
+check("confirm-none-intent-above", M.needs_confirm(None, 100, 118, 15, 5.0) is False)
+with tempfile.TemporaryDirectory() as td55b:
+    sd55b = os.path.join(td55b, "st"); os.makedirs(sd55b)
+    a55b = _mklab(os.path.join(td55b, "norepo"), sd55b, [{"number": 1}])
+    check("doctor-warnings-default", M.Lab(a55b).doctor_warnings == [])
+
 # 54. preflight refuses to burn a campaign on a missing smoke model
 with tempfile.TemporaryDirectory() as td:
     repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")

@@ -315,6 +315,7 @@ class Lab:
                 self.quar = []
         else:
             self.quar = []
+        self.doctor_warnings = []
 
     def save(self):
         # Quarantine file FIRST: a kill between the two writes must leave

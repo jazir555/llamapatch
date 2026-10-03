@@ -134,6 +134,6 @@ def needs_confirm(intent, base, val, regression_pct, noise_pct=5.0):
     band = base * noise / 100
     if val < lo:
         return val >= lo - band
-    if intent.get("expects_bench_gain") and abs(val - hi) <= band:
+    if (intent or {}).get("expects_bench_gain") and abs(val - hi) <= band:
         return True
     return False
