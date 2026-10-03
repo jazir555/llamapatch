@@ -37,6 +37,36 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+
+def _sh_path(p):
+    """bash-ready path. WSL's bash (C:\\Windows\\system32\\bash.exe) only
+    understands /mnt/<drive>/... spellings; Git-Bash takes C:/...; POSIX
+    is a no-op. URLs never match the drive-letter pattern."""
+    p = (p or "").replace("\\", "/")
+    m = re.match(r"^([A-Za-z]):/(.*)$", p)
+    if m and _is_wsl_bash():
+        return f"/mnt/{m.group(1).lower()}/{m.group(2)}"
+    return p
+
+
+_WSL_BASH = None
+
+
+def _is_wsl_bash():
+    """True when `bash` on PATH is the WSL launcher (cached probe)."""
+    global _WSL_BASH
+    if _WSL_BASH is None:
+        import shutil
+        try:
+            exe = shutil.which("bash") or "bash"
+            p = subprocess.run([exe, "-c", "echo $WSL_DISTRO_NAME"],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, timeout=30)
+            _WSL_BASH = bool((p.stdout or "").strip())
+        except Exception:
+            _WSL_BASH = False
+    return _WSL_BASH
+
 try:
     import merge_lab as _M
 except ImportError:  # pragma: no cover - standalone fallback
@@ -64,6 +94,9 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <label>Out <input id="out" type="text" value="candidates.json"></label>
 <label><input id="ci" type="checkbox"> include CI</label>
 <button onclick="triage()">Triage</button></div>
+<div class="row"><label>Clone URL <input id="cloneurl" type="text" placeholder="https://github.com/ggml-org/llama.cpp.git"></label>
+<label>Dest <input id="clonedest" type="text" placeholder="/home/user/llama-pr-lab/llama.cpp"></label>
+<button onclick="setup()">Setup checkout</button></div>
 <div class="row"><button onclick="checkAll(true)">All</button><button onclick="checkAll(false)">None</button>
 <label>Batch <input id="batch" type="text" value="10" style="width:4em"></label>
 <label>Max PRs <input id="maxprs" type="text" value="50" style="width:4em"></label>
@@ -98,6 +131,7 @@ function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;
 function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:disabled)').forEach(c=>c.checked=v);saveChecks()}
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
 async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
+async function setup(){const b={url:val('cloneurl'),dest:val('clonedest'),base:val('base')||'master'};const r=await api('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
@@ -499,8 +533,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if body.get("base"):
                 env["LAB_BASE"] = str(body["base"])
             rid = self._spawn("setup",
-                              ["bash", os.path.join(HERE, "setup_lab.sh"),
-                               url, dest], None, env=env)
+                              ["bash", _sh_path(os.path.join(HERE, "setup_lab.sh")),
+                               _sh_path(url), _sh_path(dest)], None, env=env)
             return _json(self, 200, {"id": rid})
         if self.path == "/api/merge":
             return self._merge(body)

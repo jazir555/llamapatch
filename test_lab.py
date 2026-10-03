@@ -2210,6 +2210,38 @@ try:
 finally:
     PM.Handler.app.start_run = _orig66
 
+# 67. setup endpoint provisions a checkout offline (local source repo)
+with tempfile.TemporaryDirectory() as td67:
+    src = os.path.join(td67, "src")
+    os.makedirs(src)
+    _git(src, "init", "-b", "master")
+    _git(src, "config", "user.email", "t@t"); _git(src, "config", "user.name", "t")
+    open(os.path.join(src, "f.txt"), "w").write("v1\n")
+    _git(src, "add", "-A"); _git(src, "commit", "-m", "base")
+    dest = os.path.join(td67, "lab")
+    st, body = _post60("/api/setup", {"url": src, "dest": dest,
+                                      "base": "master"})
+    _sid67 = json.loads(body).get("id") if st == 200 else None
+    check("gui-setup-accepted", st == 200 and isinstance(_sid67, int),
+          f"{st} {body[:150]}")
+    _sdone67, _stail67 = False, ""
+    for _ in range(120):
+        _t60.sleep(0.5)
+        st, body = _get60(f"/api/runs/{_sid67}")
+        _sr67 = json.loads(body)
+        if _sr67.get("status") != "running":
+            _sdone67 = _sr67.get("status") == "done"
+            _stail67 = _sr67.get("log_tail", "")
+            break
+    check("gui-setup-done", _sdone67, _stail67[-300:])
+    check("gui-setup-tree",
+          os.path.isdir(os.path.join(dest, ".git"))
+          and open(os.path.join(dest, "f.txt")).read() == "v1\n")
+    check("sh-path-url",
+          PM._sh_path("https://example.com/x.git") == "https://example.com/x.git")
+    check("sh-path-drive",
+          PM._sh_path("C:\\a\\b") == ("/mnt/c/a/b" if PM._is_wsl_bash() else "C:/a/b"))
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")
