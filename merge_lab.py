@@ -406,9 +406,14 @@ class Lab:
         """Fail-fast environment checks before touching the repo.
 
         Hard failures (raise): repo missing/not-a-repo, base ref
-        unresolvable, empty candidate list. Soft (log-only warnings):
-        missing cmake/ninja/ccache, low disk, skipped malformed entries.
-        Dry-run never reaches here, so planning works anywhere.
+        unresolvable, empty candidate list, smoke model file absent (the
+        smoke gate has no skip path — without the model every PR would
+        quarantine as smoke-failed, permanently poisoning the campaign
+        for an operator setup error; bench degrades to unverified, smoke
+        cannot). Soft (log-only warnings): missing cmake/ninja/ccache,
+        low disk, skipped malformed entries. Dry-run never reaches here,
+        so planning works anywhere. Doctor/report skip the model check
+        (they never run gates).
         """
         import shutil
         if not os.path.isdir(self.repo):
@@ -418,6 +423,13 @@ class Lab:
             raise RuntimeError(f"not a git repo: {self.repo}\n{out[-1000:]}")
         if not self.cands:
             raise RuntimeError("no usable candidates (empty or all malformed)")
+        if not getattr(self.a, "doctor", False) and not getattr(self.a, "report", False):
+            sm = os.path.expanduser(getattr(self.a, "smoke_model", "") or "")
+            if sm and not os.path.exists(sm):
+                raise RuntimeError(
+                    f"smoke model missing: {sm} — download models first "
+                    f"(fetch_models.sh); refusing to start rather than "
+                    f"quarantine good PRs as smoke-failed")
         if not self.state.get("branch"):
             rc, out = self.git(f"rev-parse --verify {self.a.base}")
             if rc != 0:

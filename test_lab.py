@@ -1617,5 +1617,39 @@ try:
 finally:
     sys.argv = _argv53
 
+# 54. preflight refuses to burn a campaign on a missing smoke model
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 1, "title": "t"}])
+    a.base = "master"
+    a.smoke_model = os.path.join(td, "no-such-model.gguf")
+    lab = M.Lab(a)
+    try:
+        lab.preflight()
+        check("preflight-missing-model", False, "must raise, not quarantine later")
+    except RuntimeError as e:
+        check("preflight-missing-model", "smoke model missing" in str(e), str(e)[:150])
+    check("preflight-no-burn", lab.state["quarantined"] == [] and lab.quar == [])
+    a.smoke_model = os.path.join(td, "m.gguf"); open(a.smoke_model, "w").write("x")
+    lab2 = M.Lab(a)
+    try:
+        lab2.preflight()
+        check("preflight-model-present", True)
+    except RuntimeError as e:
+        check("preflight-model-present", False, str(e)[:200])
+    a.smoke_model = os.path.join(td, "no-such-model.gguf")
+    a.doctor = True
+    lab3 = M.Lab(a)
+    try:
+        lab3.preflight()
+        check("preflight-doctor-skips", True)
+    except RuntimeError as e:
+        check("preflight-doctor-skips", False, str(e)[:200])
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
