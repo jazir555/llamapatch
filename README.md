@@ -96,7 +96,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 361 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
+python3 test_lab.py   # 367 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
 python3 test_e2e_mock.py  # 43 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry + head-shas + confirm-e2e + abort-e2e
 ```
 
@@ -120,8 +120,10 @@ Point it at whichever llama.cpp version to patch (repo path + base ref),
 load a candidates file, tick the PRs to merge, and Merge selected — the
 manager writes the selection to `candidates-selected.json` in the state
 dir and runs the full gated loop on it, with live log tail and the
-evidence report in-page. Triage (`--repo owner/name`, any upstream) and
-sparse setup run from the same page. Stdlib only, no dependencies;
+evidence report in-page. A Cancel button terminates the run's process
+tree (escalating to tree-kill) and clears the stale lock only when it
+belongs to the killed run — never another run's. Triage (`--repo
+owner/name`, any upstream) and sparse setup run from the same page. Stdlib only, no dependencies;
 refuses non-loopback bind addresses.
 
 ## Gate timeouts (hung builds never kill a batch)

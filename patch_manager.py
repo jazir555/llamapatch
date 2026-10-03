@@ -64,7 +64,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <button onclick="triage()">Triage</button></div>
 <div class="row"><button onclick="checkAll(true)">All</button><button onclick="checkAll(false)">None</button>
 <button onclick="merge(false)">Merge selected</button><button onclick="merge(true)">Dry run</button>
-<button onclick="report()">Report</button></div>
+<button onclick="cancel()">Cancel run</button><button onclick="report()">Report</button></div>
 <table><thead><tr><th></th><th>PR</th><th>title</th><th>score</th><th>area</th><th>verdict</th><th>status</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <h2>Log <span id="runid"></span></h2><pre id="log">(no run)</pre>
@@ -80,6 +80,7 @@ function selected(){return [...document.querySelectorAll('#rows input[type=check
 async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:false};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 async function merge(dry){const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
+async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
 function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;clearInterval(TIMER);TIMER=setInterval(poll,1000);poll()}
 async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);load()}}
 </script></body></html>
@@ -154,21 +155,35 @@ class PatchApp:
         return os.path.join(d, "state")
 
     # -- runs -----------------------------------------------------------
-    def start_run(self, kind, cmd, log_path, env=None):
+    def start_run(self, kind, cmd, log_path, env=None, state_dir=""):
+        """Spawn cmd (argv array) in background with output to log_path.
+        Popen (not run) so cancel can terminate the whole process tree."""
         with self.lock:
             self.seq += 1
             rid = self.seq
             self.runs[rid] = {"id": rid, "kind": kind, "status": "running",
                               "cmd": cmd, "log": log_path, "rc": None,
-                              "started": True}
+                              "pid": None, "state_dir": state_dir,
+                              "cancel_note": ""}
         def _bg():
             rc = 2
+            proc = None
             try:
+                with self.lock:
+                    if self.runs[rid]["status"] != "running":
+                        return  # cancelled before spawn: never start the child
                 with open(log_path, "w") as f:
-                    p = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT,
-                                       text=True, timeout=86400, env=env,
-                                       cwd=HERE)
-                    rc = p.returncode
+                    kw = {}
+                    if os.name != "nt":
+                        kw["start_new_session"] = True
+                    else:
+                        kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
+                                            text=True, env=env, cwd=HERE, **kw)
+                    with self.lock:
+                        self.runs[rid]["pid"] = proc.pid
+                        self.runs[rid]["proc"] = proc
+                    rc = proc.wait(timeout=86400)
             except Exception as e:
                 try:
                     with open(log_path, "a") as f:
@@ -176,16 +191,105 @@ class PatchApp:
                 except Exception:
                     pass
             with self.lock:
-                self.runs[rid]["status"] = "done" if rc == 0 else "failed"
-                self.runs[rid]["rc"] = rc
+                rec = self.runs[rid]
+                if rec["status"] == "running":
+                    rec["status"] = "done" if rc == 0 else "failed"
+                rec["rc"] = rc
         threading.Thread(target=_bg, daemon=True).start()
         return rid
+
+    def cancel_run(self, rid):
+        """Terminate the run's process tree, then clear OUR stale lock only:
+        lab.lock is removed iff its pid is our reaped child (never another
+        run's). Returns (http_code, dict). Liveness comes from our own
+        Popen handle (poll), never signal probing — portable, no pid-reuse
+        race."""
+        with self.lock:
+            rec = self.runs.get(rid)
+            if rec is None:
+                return 404, {"error": "unknown run"}
+            if rec["status"] != "running":
+                return 200, {"id": rid, "status": rec["status"],
+                             "note": "already finished"}
+            proc = rec.get("proc")
+            pid = rec.get("pid")
+        note = []
+        if proc is None:
+            note.append("process not started yet; marked cancelled")
+        elif proc.poll() is not None:
+            note.append("process already exited; marked cancelled")
+        else:
+            try:
+                import signal
+                proc.terminate()
+                try:
+                    proc.wait(timeout=15)
+                    note.append(f"process {pid} terminated")
+                except subprocess.TimeoutExpired:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/PID", str(pid),
+                                        "/T", "/F"],
+                                       capture_output=True, timeout=30)
+                    else:
+                        try:
+                            os.killpg(os.getpgid(pid), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError):
+                            pass
+                    try:
+                        proc.wait(timeout=10)
+                        note.append(f"process tree {pid} killed")
+                    except subprocess.TimeoutExpired:
+                        note.append(f"process tree {pid} would not die")
+            except Exception as e:
+                note.append(f"terminate failed: {e}")
+        with self.lock:
+            rec = self.runs.get(rid, {})
+            rec["status"] = "cancelled"
+            rec["cancel_note"] = "; ".join(note)
+        lock_note = self._clear_owned_lock(rec)
+        if lock_note:
+            with self.lock:
+                self.runs[rid]["cancel_note"] += "; " + lock_note
+            note.append(lock_note)
+        try:
+            with open(rec.get("log", ""), "a") as f:
+                f.write(f"\n[manager] cancelled: {'; '.join(note)}\n")
+        except Exception:
+            pass
+        return 200, {"id": rid, "status": "cancelled", "note": "; ".join(note)}
+
+    @staticmethod
+    def _clear_owned_lock(rec):
+        """Remove lab.lock iff it belongs to our reaped child. Never touch
+        another run's lock: a pid mismatch means hands off, and liveness
+        comes from our own Popen handle (no pid-reuse race, no signals)."""
+        sd = rec.get("state_dir") or ""
+        pid = rec.get("pid")
+        proc = rec.get("proc")
+        if not sd or not pid or proc is None:
+            return ""
+        lp = os.path.join(sd, "lab.lock")
+        try:
+            with open(lp) as f:
+                info = json.load(f)
+        except Exception:
+            return ""
+        if not isinstance(info, dict) or info.get("pid") != pid:
+            return "lock belongs to another run; left alone"
+        if proc.poll() is None:
+            return "lock holder still alive; left alone"
+        try:
+            os.remove(lp)
+            return "stale owned lock cleared"
+        except Exception as e:
+            return f"lock removal failed: {e}"
 
     def run_info(self, rid):
         with self.lock:
             rec = dict(self.runs.get(rid, {}))
         if not rec:
             return None
+        rec.pop("proc", None)  # Popen handle is not JSON-serializable
         tail = ""
         try:
             with open(rec["log"]) as f:
@@ -307,12 +411,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return _json(self, 200, {"id": rid})
         if self.path == "/api/merge":
             return self._merge(body)
+        if self.path.startswith("/api/runs/") and self.path.endswith("/cancel"):
+            try:
+                rid = int(self.path.split("/")[3])
+            except (ValueError, IndexError):
+                return _json(self, 400, {"error": "bad run id"})
+            code, obj = self.app.cancel_run(rid)
+            return _json(self, code, obj)
         return _json(self, 404, {"error": "unknown path"})
 
-    def _spawn(self, kind, cmd, log_hint, env=None):
+    def _spawn(self, kind, cmd, log_hint, env=None, state_dir=""):
         logdir = tempfile.mkdtemp(prefix="llamapatch-run-")
         log_path = os.path.join(logdir, f"{kind}.log")
-        return self.app.start_run(kind, cmd, log_path, env=env)
+        return self.app.start_run(kind, cmd, log_path, env=env,
+                                  state_dir=state_dir)
 
     def _merge(self, body):
         cands, err = self.app.load_candidates(body.get("candidates", ""))
@@ -351,7 +463,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                "--max-prs", str(max_prs)]
         if body.get("dry_run"):
             cmd.append("--dry-run")
-        rid = self._spawn("merge", cmd, None)
+        rid = self._spawn("merge", cmd, None, state_dir=sd)
         return _json(self, 200, {"id": rid, "selected": os.path.basename(sel_path)})
 
 

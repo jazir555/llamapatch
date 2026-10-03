@@ -1958,8 +1958,46 @@ try:
                           + "&state_dir=" + _up60.quote(sd60))
         check("gui-report", st == 200 and "llamapatch report" in body, body[:150])
 finally:
-    _srv60.shutdown()
-    _srv60.server_close()
+    pass  # server stays up for section 61; shut down at file end
+
+# 61. run cancel kills the tree and only our own stale lock
+st, _ = _post60("/api/runs/999999/cancel", {})
+check("cancel-unknown", st == 404, str(st))
+with tempfile.TemporaryDirectory() as td61:
+    sd61 = os.path.join(td61, "st"); os.makedirs(sd61)
+    _log61 = os.path.join(td61, "t.log")
+    _rid61 = PM.Handler.app.start_run(
+        "test", [sys.executable, "-c", "import time; time.sleep(120)"],
+        _log61, state_dir=sd61)
+    for _ in range(100):
+        _pid61 = PM.Handler.app.runs[_rid61].get("pid")
+        if _pid61:
+            break
+        _t60.sleep(0.1)
+    json.dump({"pid": _pid61 or 0}, open(os.path.join(sd61, "lab.lock"), "w"))
+    st, body = _post60(f"/api/runs/{_rid61}/cancel", {})
+    _c61 = json.loads(body)
+    check("cancel-ok", st == 200 and _c61.get("status") == "cancelled",
+          f"{st} {body[:200]}")
+    _proc61 = PM.Handler.app.runs[_rid61].get("proc")
+    check("cancel-dead", _proc61 is not None and _proc61.poll() is not None)
+    check("cancel-owned-lock",
+          not os.path.exists(os.path.join(sd61, "lab.lock"))
+          and "cleared" in _c61.get("note", ""), _c61.get("note", ""))
+    st, body = _post60(f"/api/runs/{_rid61}/cancel", {})
+    check("cancel-idempotent", st == 200 and "already finished" in body, body[:150])
+    _rid61b = PM.Handler.app.start_run(
+        "test", [sys.executable, "-c", "import time; time.sleep(120)"],
+        os.path.join(td61, "t2.log"), state_dir=sd61)
+    for _ in range(100):
+        if PM.Handler.app.runs[_rid61b].get("pid"):
+            break
+        _t60.sleep(0.1)
+    json.dump({"pid": os.getpid()}, open(os.path.join(sd61, "lab.lock"), "w"))
+    st, body = _post60(f"/api/runs/{_rid61b}/cancel", {})
+    check("cancel-foreign-lock",
+          os.path.exists(os.path.join(sd61, "lab.lock"))
+          and "left alone" in body, body[:200])
 
 # 59. triage works against any upstream slug (generic patch manager)
 check("api-base", F.api_base("acme/widgets") == "https://api.github.com/repos/acme/widgets")
@@ -2045,6 +2083,9 @@ with tempfile.TemporaryDirectory() as td:
         check("preflight-doctor-skips", True)
     except RuntimeError as e:
         check("preflight-doctor-skips", False, str(e)[:200])
+
+_srv60.shutdown()
+_srv60.server_close()
 
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
