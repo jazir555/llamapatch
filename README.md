@@ -201,6 +201,11 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
     labels) skip instead of crashing the 1k run; 5 consecutive stage-2
     errors abort with partial output (exit 2) instead of hours of 30s
     backoffs. `triage-1k.sh` forwards extra args (`"$@"`).
+  - *Model gate:* preflight refuses to start when the smoke-model file is
+    absent — without it every PR would quarantine as `smoke-failed`,
+    permanently, for an operator setup error. (Bench degrades to
+    unverified when its model is absent; smoke has no skip path, so
+    refusal is the only safe answer. Doctor/report skip the check.)
 
 ## Results (2026-10-02, WSL Ubuntu, 4 vCPU, CPU backend, threads=2)
 
