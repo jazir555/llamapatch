@@ -549,6 +549,32 @@ with tempfile.TemporaryDirectory() as td:
     check("doctor-requeues-transient", lab.state["quarantined"] == [6],
           str(lab.state["quarantined"]))
 
+# 38. reverted/phantom drops prune recorded head SHAs (no orphans)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 5}, {"number": 6}])
+    a.base = "master"
+    lab = M.Lab(a)
+    lab.state["base_sha"] = _git(repo, "rev-parse", "HEAD")[1].strip()
+    lab.state["merged"] = [5]
+    lab.state["merged_heads"] = {"5": "a" * 40}
+    lab.save()
+    lab._drop_merged(5)
+    check("drop-prunes-head",
+          lab.state["merged"] == [] and lab.state.get("merged_heads") == {},
+          str(lab.state.get("merged_heads")))
+    lab.state["merged"] = [5, 6]
+    lab.state["merged_heads"] = {"5": "a" * 40, "6": "b" * 40}
+    lab.save()
+    lab.doctor()
+    check("doctor-prunes-heads", lab.state.get("merged_heads") == {},
+          str(lab.state.get("merged_heads")))
+
 # 23. quarantine dedup (retry cycles must not grow the file unboundedly)
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)

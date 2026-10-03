@@ -820,9 +820,15 @@ class Lab:
     def _drop_merged(self, n):
         """Remove a reverted culprit from the merged list (quarantine() only
         appends to quarantined; without this the state claims a PR whose
-        commit is gone — exactly the phantom doctor would later drop)."""
+        commit is gone — exactly the phantom doctor would later drop).
+        Its recorded head SHA goes too: a reverted PR was never kept, so
+        forensics must not attribute the tree to it. (bench_results keeps
+        its late-* stamp as history; quarantine()'s save persists.)"""
         if n in self.state["merged"]:
             self.state["merged"] = [m for m in self.state["merged"] if m != n]
+        mh = self.state.get("merged_heads")
+        if isinstance(mh, dict):
+            mh.pop(str(n), None)
 
     def _mark_late(self, n, verdict):
         """Stamp a heal-reverted culprit's bench verdict so reports and the
@@ -1065,6 +1071,12 @@ class Lab:
             else:
                 fixed_quar.append(q)
         self.state["merged"] = fixed_merged
+        # Phantom drops must not leave orphan head SHAs behind either.
+        mh = self.state.get("merged_heads")
+        if isinstance(mh, dict):
+            keep = {str(m) for m in fixed_merged}
+            for k in [k for k in mh if k not in keep]:
+                del mh[k]
         self.state["quarantined"] = [n for n in self.state["quarantined"] if n not in requeued]
         self.quar = fixed_quar
         self.save()
