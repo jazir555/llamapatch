@@ -96,7 +96,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 406 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
+python3 test_lab.py   # 407 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
 python3 test_e2e_mock.py  # 43 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry + head-shas + confirm-e2e + abort-e2e
 ```
 
@@ -117,12 +117,12 @@ bash llamapatch gui --port 9000
 ```
 
 Point it at whichever llama.cpp version to patch (repo path + base ref —
-the Versions button lists the checkout's branches/tags, and a bad base is
-rejected before any run starts),
+the Versions button lists the checkout's branches/tags, warns on
+origin/slug mismatch, and a bad base is rejected before any run starts),
 load a candidates file, tick the PRs to merge, and Merge selected — the
 manager writes the selection to `candidates-selected.json` in the state
-dir and runs the full gated loop on it, with live log tail and the
-evidence report in-page. Rows show head SHA, touched files, CI state, and
+dir and runs the full gated loop on it, with live log tail and an
+auto-refreshed evidence report on completion. Rows show head SHA, touched files, CI state, and
 intent reasoning; a per-row diff button previews the PR against the base
 (fetched into an isolated preview/N namespace, never the loop's refs);
 checkbox selections and form fields persist across reloads

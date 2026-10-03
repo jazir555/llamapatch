@@ -2274,6 +2274,21 @@ with tempfile.TemporaryDirectory() as td68:
             break
         _t60.sleep(0.1)
 
+# 69. refs report checkout origin for slug-match decisions
+with tempfile.TemporaryDirectory() as td69:
+    repo = os.path.join(td69, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    st, body = _get60("/api/refs?repo=" + _up60.quote(repo))
+    _r69 = json.loads(body)
+    check("gui-refs-origin", st == 200
+          and _r69.get("origin") == "https://github.com/acme/widgets.git",
+          body[:200])
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")
