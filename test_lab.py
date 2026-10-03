@@ -1331,6 +1331,46 @@ check("triage-forwards-flags",
 check("dispatcher-forwards-flags",
       _dispatcher45.count('"$@"') >= 3, "merge/dry/doctor/report forward flags")
 
+# 47. triage scoring contract (wrong picks waste whole 10-batches)
+import fetch_prs as F
+_tcfg = {"perf_keywords": ["fix", "bug", "cuda", "flash attention", "q4_0"],
+         "perf_paths": ["ggml/src", "src/", "common/"]}
+check("score-hits", F.score_title("vulkan cuda kernels", "", _tcfg)[0] >= 1)
+check("score-stem", "fix" in F.score_title("fixes crash on load", "", _tcfg)[1])
+check("score-no-debug", "bug" not in F.score_title("debug helper", "", _tcfg)[1])
+check("score-no-prefix", "fix" not in F.score_title("prefix handling", "", _tcfg)[1])
+check("score-phrase", "flash attention" in F.score_title("Flash Attention kernel", "", _tcfg)[1])
+check("score-punct", "q4_0" in F.score_title("q4_0 quant fix", "", _tcfg)[1])
+check("score-empty", F.score_title("", "", _tcfg) == (0, []))
+check("perf-prefix", F.touches_perf(["ggml/src/foo.c"], _tcfg) is True)
+check("perf-exact-dir", F.touches_perf(["common"], _tcfg) is True)
+check("perf-no-substring", F.touches_perf(["srcfoo/x.c", "mycommon/y.c"], _tcfg) is False)
+import urllib.error as _ue
+from email.message import Message as _Msg
+_h = _Msg(); _h["X-RateLimit-Remaining"] = "0"
+check("ratelimit-429", F.is_rate_limit(_ue.HTTPError("u", 429, "too many", None, None)) is True)
+check("ratelimit-quota", F.is_rate_limit(_ue.HTTPError("u", 403, "forbidden", _h, None)) is True)
+check("ratelimit-msg", F.is_rate_limit(_ue.HTTPError("u", 403, "rate limit exceeded", None, None)) is True)
+check("ratelimit-other403", F.is_rate_limit(_ue.HTTPError("u", 403, "forbidden", None, None)) is False)
+check("ratelimit-nontype", F.is_rate_limit(ValueError("x")) is False)
+sleeps = []
+def _flaky(page):
+    if len(sleeps) < 2:
+        raise ConnectionError("blip")
+    return ([f"p{page}"], True)
+items, err = F.collect_pages(_flaky, 10, sleep=sleeps.append, retries=3)
+check("pages-retry", items == ["p1"] and err is None and sleeps == [1, 2],
+      f"{items} {err} {sleeps}")
+def _dead(page):
+    if page == 1:
+        return (["a"], False)
+    raise ConnectionError("down")
+items, err = F.collect_pages(_dead, 10, sleep=lambda s: None, retries=1)
+check("pages-partial", items == ["a"] and isinstance(err, ConnectionError),
+      f"{items} {err}")
+items, err = F.collect_pages(lambda p: ([1, 2, 3], False), 2, sleep=lambda s: None)
+check("pages-limit", items == [1, 2] and err is None, f"{items}")
+
 # 46. lifecycle details: lock names the hatch, identity never clobbers
 with tempfile.TemporaryDirectory() as td:
     M.acquire_lock(td)
