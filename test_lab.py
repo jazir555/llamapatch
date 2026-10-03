@@ -2165,6 +2165,51 @@ with tempfile.TemporaryDirectory() as td65b:
     check("gui-ci-column", st == 200 and _c65.get("ci") == "failure",
           body[:200])
 
+# 66. quarantine reasons, run progress, triage CI passthrough
+with tempfile.TemporaryDirectory() as td66:
+    cf66 = os.path.join(td66, "c.json")
+    json.dump([{"number": 8, "title": "q"}], open(cf66, "w"))
+    sd66 = os.path.join(td66, "st"); os.makedirs(sd66)
+    json.dump({"merged": [], "quarantined": [8]},
+              open(os.path.join(sd66, "lab-state.json"), "w"))
+    json.dump([{"pr": 8, "reason": "merge-conflict", "detail": "ctx"}],
+              open(os.path.join(sd66, "quarantined.json"), "w"))
+    st, body = _get60("/api/candidates?file=" + _up60.quote(cf66)
+                      + "&state_dir=" + _up60.quote(sd66))
+    _r66 = json.loads(body)["candidates"][0]
+    check("gui-quar-reason", st == 200 and _r66.get("quar_reason") == "merge-conflict"
+          and _r66.get("status") == "quarantined", body[:250])
+    st, body = _post60("/api/merge", {"candidates": cf66, "repo": td66,
+                                      "state_dir": sd66, "numbers": [8],
+                                      "dry_run": True})
+    _mid66 = json.loads(body).get("id")
+    for _ in range(60):
+        _t60.sleep(0.5)
+        st, body = _get60(f"/api/runs/{_mid66}")
+        if json.loads(body).get("status") != "running":
+            break
+    st, body = _get60("/api/runs")
+    _e66 = [r for r in json.loads(body).get("runs", []) if r.get("id") == _mid66]
+    check("gui-run-progress",
+          st == 200 and len(_e66) == 1
+          and _e66[0].get("merged_n") == 0 and _e66[0].get("quar_n") == 1,
+          body[:250])
+_orig66 = PM.Handler.app.start_run
+_seen66 = {}
+def _fake66(kind, cmd, log_path, env=None, state_dir=""):
+    _seen66["cmd"] = cmd
+    return 999
+PM.Handler.app.start_run = _fake66
+try:
+    st, body = _post60("/api/triage", {"slug": "acme/widgets", "limit": 5,
+                                       "top": 2, "out": "x.json",
+                                       "include_ci": True})
+    check("gui-triage-ci",
+          st == 200 and "--include-ci" in _seen66.get("cmd", [])
+          and "--repo" in _seen66.get("cmd", []), f"{st} {_seen66}")
+finally:
+    PM.Handler.app.start_run = _orig66
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")

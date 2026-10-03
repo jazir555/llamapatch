@@ -62,6 +62,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <div class="row"><label>Limit <input id="limit" type="text" value="200" style="width:5em"></label>
 <label>Top <input id="top" type="text" value="50" style="width:5em"></label>
 <label>Out <input id="out" type="text" value="candidates.json"></label>
+<label><input id="ci" type="checkbox"> include CI</label>
 <button onclick="triage()">Triage</button></div>
 <div class="row"><button onclick="checkAll(true)">All</button><button onclick="checkAll(false)">None</button>
 <label>Batch <input id="batch" type="text" value="10" style="width:4em"></label>
@@ -79,12 +80,12 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1;
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
 async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();ROWS=d.candidates;render()}
-function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number} <button onclick="preview(${c.number})" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
+function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number} <button onclick="preview(${c.number})" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.quar_reason?` (${esc(c.quar_reason)})`:''}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
 async function preview(n){const b={repo:val('repo'),base:val('base')||'master',number:n};const d=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('rep').textContent=`#${n} vs ${d.base}\n${d.stat}\n---\n${d.diff}`}
 async function release(ns){const b={candidates:val('cands'),state_dir:val('statedir'),numbers:ns};const r=await api('/api/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load()}
 async function doctor(){const b={candidates:val('cands'),repo:val('repo'),state_dir:val('statedir')};const r=await api('/api/doctor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 function sort(k){if(SORTK===k)SORTD*=-1;else{SORTK=k;SORTD=1}render();return false}
-async function runs(){const d=await api('/api/runs');document.getElementById('runs').textContent=d.runs.length?d.runs.map(r=>`#${r.id} ${r.kind} ${r.status}${r.rc==null?'':' rc='+r.rc}`).join(String.fromCharCode(10)):'(no runs)'}
+async function runs(){const d=await api('/api/runs');document.getElementById('runs').textContent=d.runs.length?d.runs.map(r=>`#${r.id} ${r.kind} ${r.status}${r.rc==null?'':' rc='+r.rc}${r.merged_n==null?'':` M${r.merged_n}/Q${r.quar_n??0}`}`).join(String.fromCharCode(10)):'(no runs)'}
 async function versions(){const q=new URLSearchParams({repo:val('repo')});const d=await api('/api/refs?'+q);const dl=document.getElementById('refs');dl.innerHTML='';for(const b of [...(d.branches||[]),...(d.tags||[])]){const o=document.createElement('option');o.value=b;dl.appendChild(o)}}
 function selKey(){return 'llamapatch-sel:'+val('cands')}
 function savedChecks(){try{const s=JSON.parse(localStorage.getItem(selKey())||'null');return Array.isArray(s)?new Set(s):null}catch(e){return null}}
@@ -96,7 +97,7 @@ function val(id){return document.getElementById(id).value.trim()}
 function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
 function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:disabled)').forEach(c=>c.checked=v);saveChecks()}
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
-async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:false};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
+async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
@@ -395,6 +396,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             state, quar, bench, merged = self.app.load_state(sd)
             qset = set(state.get("quarantined", []) or [])
             rows = []
+            qreason = {}
+            for q in quar:
+                if isinstance(q, dict) and isinstance(q.get("pr"), int):
+                    qreason.setdefault(q["pr"], q.get("reason", ""))
             for c in cands:
                 n = c["number"]
                 b = bench.get(str(n), {}) if isinstance(bench, dict) else {}
@@ -411,6 +416,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "files": files[:8], "file_count": len(files),
                              "ci": c.get("ci_state", "") or "",
                              "verdict": b.get("verdict", ""),
+                             "quar_reason": qreason.get(n, ""),
                              "status": status})
             return _json(self, 200, {"candidates": rows, "state_dir": sd})
         if u.path.startswith("/api/runs/"):
@@ -427,6 +433,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 runs = [{"id": r["id"], "kind": r.get("kind", ""),
                          "status": r.get("status", ""),
                          "rc": r.get("rc")} for r in self.app.runs.values()]
+            for r in runs:
+                sd = self.app.runs.get(r["id"], {}).get("state_dir") or ""
+                if sd:
+                    try:
+                        _st, _, _, _mg = self.app.load_state(sd)
+                        r["merged_n"] = len(_mg or [])
+                        r["quar_n"] = len(_st.get("quarantined", []) or [])
+                    except Exception:
+                        pass
             return _json(self, 200, {"runs": runs})
         if u.path == "/api/report":
             if _M is None:

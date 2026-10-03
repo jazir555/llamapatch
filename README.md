@@ -96,7 +96,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 391 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
+python3 test_lab.py   # 394 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow/slug/gui
 python3 test_e2e_mock.py  # 43 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry + head-shas + confirm-e2e + abort-e2e
 ```
 
@@ -128,13 +128,14 @@ intent reasoning; a per-row diff button previews the PR against the base
 checkbox selections and form fields persist across reloads
 (localStorage, per candidates file); the table sorts/filters client-side.
 Batch size and max PRs are tunable per merge; a run history lists every
-triaged/merged run with status. Quarantined PRs release back to pending
+triaged/merged run with status and live merged/quarantined counts. Quarantined PRs release back to pending
 per-row (retry after upstream fixes), and Doctor reconciles state from
 the page. A Cancel button terminates the run's process tree (escalating
 to tree-kill) and clears the stale lock only when it belongs to the
 killed run — never another run's. Triage (`--repo owner/name`, any
-upstream) and sparse setup run from the same page. Stdlib only, no
-dependencies; refuses non-loopback bind addresses.
+upstream) and sparse setup run from the same page. Rows carry quarantine
+reasons for release decisions; triage offers an include-CI toggle. Stdlib
+only, no dependencies; refuses non-loopback bind addresses.
 
 ## Gate timeouts (hung builds never kill a batch)
 
