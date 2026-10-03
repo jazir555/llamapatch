@@ -2404,7 +2404,7 @@ if _node63:
     with tempfile.TemporaryDirectory() as td63b:
         _js63 = PM.PAGE.split("<script>", 1)[1].rsplit("</script>", 1)[0]
         _jf63 = os.path.join(td63b, "page.js")
-        open(_jf63, "w").write(_js63)
+        open(_jf63, "w", encoding="utf-8").write(_js63)
         _nr63 = _sp3.run([_node63, "--check", _jf63], capture_output=True,
                          text=True, timeout=60)
         check("gui-js-parses", _nr63.returncode == 0, _nr63.stderr[:300])
