@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # llamapatch entrypoint: triage + batch-10 mass-merge loop.
 # Usage:
+#   bash llamapatch gui [--port 8123]      # checkbox patch manager (browser)
 #   bash llamapatch setup [repo-url] [dest-dir]   # partial/shallow clone
 #   bash llamapatch triage [--limit 1000 --top 200]
 #   bash llamapatch merge [--batch 10 --max-prs 50]
@@ -12,6 +13,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CMD="${1:-help}"; shift || true
 PY=python3
 case "$CMD" in
+  gui)
+    $PY -u "$HERE/patch_manager.py" "$@"
+    ;;
   setup)
     bash "$HERE/setup_lab.sh" "$@"
     ;;
@@ -33,7 +37,7 @@ case "$CMD" in
     $PY -u "$HERE/merge_lab.py" --candidates "${CANDIDATES:-candidates-1k.json}" --report "$@"
     ;;
   *)
-    echo "usage: bash llamapatch {setup|triage|merge|dry|doctor|report}"
+    echo "usage: bash llamapatch {gui|setup|triage|merge|dry|doctor|report}"
     exit 1
     ;;
 esac

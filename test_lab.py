@@ -1871,6 +1871,96 @@ with tempfile.TemporaryDirectory() as td:
           any(q["pr"] == 71 and q["reason"] == "late-build-failed" for q in lab.quar),
           str(lab.quar))
 
+# 60. patch manager API (stdlib GUI backend, live localhost server)
+import patch_manager as PM
+import socketserver as _ss60
+import http.client as _hc60
+import threading as _th60
+import time as _t60
+import urllib.parse as _up60
+_srv60 = _ss60.ThreadingTCPServer(("127.0.0.1", 0), PM.Handler)
+_port60 = _srv60.server_address[1]
+_th60.Thread(target=_srv60.serve_forever, daemon=True).start()
+def _get60(path):
+    c = _hc60.HTTPConnection("127.0.0.1", _port60, timeout=30)
+    c.request("GET", path)
+    r = c.getresponse()
+    return r.status, r.read().decode()
+def _post60(path, obj):
+    raw = json.dumps(obj).encode()
+    c = _hc60.HTTPConnection("127.0.0.1", _port60, timeout=30)
+    c.request("POST", path, raw, {"Content-Type": "application/json"})
+    r = c.getresponse()
+    return r.status, r.read().decode()
+try:
+    st, body = _get60("/")
+    check("gui-index", st == 200 and "checkbox" in body and "Merge selected" in body,
+          str(st))
+    with tempfile.TemporaryDirectory() as td60:
+        cf60 = os.path.join(td60, "c.json")
+        json.dump([{"number": 1, "title": "one", "score": 5,
+                    "intent": {"area": "perf"}},
+                   {"number": 2, "title": "two", "score": 1},
+                   {"number": 3, "title": "three", "score": 0}], open(cf60, "w"))
+        sd60 = os.path.join(td60, "st"); os.makedirs(sd60)
+        json.dump({"merged": [1], "quarantined": [2], "bench_baseline": None,
+                   "batches_done": 0}, open(os.path.join(sd60, "lab-state.json"), "w"))
+        json.dump([], open(os.path.join(sd60, "quarantined.json"), "w"))
+        st, body = _get60("/api/candidates?file=" + _up60.quote(cf60)
+                          + "&state_dir=" + _up60.quote(sd60))
+        _d60 = json.loads(body)
+        check("gui-candidates",
+              st == 200 and {c["number"]: c["status"] for c in _d60["candidates"]}
+              == {1: "merged", 2: "quarantined", 3: "pending"}, body[:300])
+        check("gui-area", [c for c in _d60["candidates"] if c["number"] == 1][0]["area"] == "perf")
+        st, _ = _get60("/api/candidates?file=" + os.path.join(td60, "nope.json"))
+        check("gui-missing", st == 404, str(st))
+        bad60 = os.path.join(td60, "bad.json")
+        json.dump({"not": "a list"}, open(bad60, "w"))
+        st, _ = _get60("/api/candidates?file=" + _up60.quote(bad60))
+        check("gui-malformed", st == 422, str(st))
+        st, _ = _post60("/api/merge", {"candidates": cf60, "repo": td60,
+                                       "numbers": []})
+        check("gui-empty-selection", st == 400, str(st))
+        st, _ = _post60("/api/merge", {"candidates": cf60, "repo": td60,
+                                       "numbers": [999]})
+        check("gui-unknown-pr", st == 400, str(st))
+        st, _ = _post60("/api/merge", {"candidates": cf60, "repo": "",
+                                       "numbers": [3]})
+        check("gui-no-repo", st == 400, str(st))
+        st, _ = _post60("/api/triage", {"slug": "bogus"})
+        check("gui-bad-slug", st == 400, str(st))
+        st, _ = _post60("/api/setup", {"url": "https://example/x.git", "dest": ""})
+        check("gui-setup-validation", st == 400, str(st))
+        st, body = _post60("/api/merge", {"candidates": cf60, "repo": td60,
+                                         "state_dir": os.path.join(td60, "stm"),
+                                         "numbers": [2, 3], "dry_run": True,
+                                         "batch": 10, "max_prs": 10})
+        _mid60 = json.loads(body).get("id")
+        check("gui-merge-accepted", st == 200 and isinstance(_mid60, int),
+              f"{st} {body[:150]}")
+        _done60, _tail60 = False, ""
+        for _ in range(60):
+            _t60.sleep(0.5)
+            st, body = _get60(f"/api/runs/{_mid60}")
+            _r60 = json.loads(body)
+            if _r60.get("status") != "running":
+                _done60 = _r60.get("status") == "done"
+                _tail60 = _r60.get("log_tail", "")
+                break
+        check("gui-merge-dry-run", _done60 and "batch: [2, 3]" in _tail60,
+              _tail60[-300:])
+        _sel60 = json.load(open(os.path.join(td60, "stm",
+                                             "candidates-selected.json")))
+        check("gui-selected-file", sorted(c["number"] for c in _sel60) == [2, 3],
+              str(_sel60))
+        st, body = _get60("/api/report?candidates=" + _up60.quote(cf60)
+                          + "&state_dir=" + _up60.quote(sd60))
+        check("gui-report", st == 200 and "llamapatch report" in body, body[:150])
+finally:
+    _srv60.shutdown()
+    _srv60.server_close()
+
 # 59. triage works against any upstream slug (generic patch manager)
 check("api-base", F.api_base("acme/widgets") == "https://api.github.com/repos/acme/widgets")
 check("api-default", F.API == F.api_base(F.DEFAULT_REPO)
