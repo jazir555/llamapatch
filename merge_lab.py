@@ -789,11 +789,16 @@ class Lab:
         would poison every future verdict with PR improvements baked in —
         a machine for false perf-regressions. Defer loudly instead; gates
         fall back to unverified, never to wrong numbers.
+
+        Anchors on the mean of two runs: every verdict of the campaign (up
+        to 50 merges) compares against this one number, so halving its
+        noise is worth one extra bench per base change. A flaked second
+        run keeps the first; --bench-noise-pct 0 restores a single run.
         """
         if not self.a.bench_model or (self.a.regression_pct or 0) <= 0:
             return
         if self.state.get("bench_baseline_sha") is not None and \
-           self.state.get("bench_baseline_sha") == self.state.get("base_sha"):
+            self.state.get("bench_baseline_sha") == self.state.get("base_sha"):
             return
         model = os.path.expanduser(self.a.bench_model)
         if not (os.path.exists(model) or os.path.exists(model + ".1")):
@@ -808,7 +813,7 @@ class Lab:
             head = head.strip() if rc == 0 else ""
         except Exception:
             head = ""
-        if head and self.state.get("base_sha") and head != self.state["base_sha"]:
+        if head and self.state.get("base_sha") and head != self.state.get("base_sha"):
             print("baseline deferred: HEAD holds campaign merges, "
                   "baseline must come from the clean base", flush=True)
             self.log(event="baseline-deferred", head=head[:8],
@@ -818,12 +823,26 @@ class Lab:
         print(f"baseline build: {'OK' if ok else 'FAIL'}", flush=True)
         if not ok:
             return
-        okb, val, bout = self.bench()
+        runs, last_bout = [], ""
+        attempts = 2 if getattr(self.a, "bench_noise_pct", 5.0) else 1
+        for _ in range(attempts):
+            try:
+                okb, val, bout = self.bench()
+            except Exception as e:
+                self.log(event="baseline-bench-error", detail=str(e)[-300:])
+                continue
+            if okb and val is not None:
+                runs.append(val)
+            else:
+                last_bout = bout
+        val = sum(runs) / len(runs) if runs else None
         self.state["bench_baseline"] = val
         self.state["bench_baseline_sha"] = self.state.get("base_sha")
-        print(f"baseline bench tg: {val}", flush=True)
+        if runs:
+            self.state["bench_baseline_runs"] = runs
+        print(f"baseline bench tg: {val} runs={runs}", flush=True)
         if val is None:
-            self.log(event="baseline-bench-unparsed", detail=bout[-1000:])
+            self.log(event="baseline-bench-unparsed", detail=str(last_bout)[-1000:])
         self.save()
 
     def maybe_force_unlock(self):

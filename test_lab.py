@@ -406,11 +406,11 @@ with tempfile.TemporaryDirectory() as td:
           lab.state["bench_baseline"] == 42.0 and lab.state["bench_baseline_sha"] == "abc123",
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_sha")}))
     lab.ensure_baseline()
-    check("baseline-cached", calls == {"build": 1, "bench": 1}, str(calls))
+    check("baseline-cached", calls == {"build": 1, "bench": 2}, str(calls))
     lab.state["base_sha"] = "def456"
     lab.ensure_baseline()
     check("baseline-rebuilt",
-          calls == {"build": 2, "bench": 2} and lab.state["bench_baseline_sha"] == "def456",
+          calls == {"build": 2, "bench": 4} and lab.state["bench_baseline_sha"] == "def456",
           f"{calls} {lab.state.get('bench_baseline_sha')}")
 
 with tempfile.TemporaryDirectory() as td:
@@ -436,7 +436,7 @@ with tempfile.TemporaryDirectory() as td:
     check("baseline-unparsed-sha",
           lab.state["bench_baseline"] is None and lab.state["bench_baseline_sha"] == "abc123")
     lab.ensure_baseline()
-    check("baseline-unparsed-no-loop", n == {"bench": 1}, str(n))
+    check("baseline-unparsed-no-loop", n == {"bench": 2}, str(n))
 
 # 18. clean start after kills (dirty tracked files must not fake conflicts)
 with tempfile.TemporaryDirectory() as td:
@@ -1141,7 +1141,7 @@ with tempfile.TemporaryDirectory() as td:
     _git(repo, "checkout", base)
     lab.ensure_baseline()
     check("baseline-clean-head",
-          calls == {"build": 1, "bench": 1} and lab.state["bench_baseline"] == 99.0,
+          calls == {"build": 1, "bench": 2} and lab.state["bench_baseline"] == 99.0,
           f"{calls} {lab.state.get('bench_baseline')}")
 
 # 34. report surfaces post-run heals (caught AFTER merges, not at merge time)
@@ -1223,6 +1223,49 @@ with tempfile.TemporaryDirectory() as td:
     lab2 = M.Lab(a2)
     ok2, reason2 = lab2.merge_one_committed(5, "batch-0")
     check("current-fallback-merges", ok2, str(reason2))
+
+# 42. baseline anchors on the mean of two runs (one number, 50 verdicts)
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.state["base_sha"] = "abc123"
+    lab.build = lambda: (True, "ok")
+    vals = [40.0, 44.0]
+    lab.bench = lambda: (True, vals.pop(0) if vals else 44.0, "out")
+    lab.ensure_baseline()
+    check("baseline-mean",
+          lab.state["bench_baseline"] == 42.0
+          and lab.state.get("bench_baseline_runs") == [40.0, 44.0],
+          str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.a.bench_noise_pct = 0  # operator-disabled: single run
+    lab.state["base_sha"] = "abc123"
+    n = {"bench": 0}
+    lab.build = lambda: (True, "ok")
+    lab.bench = lambda: (n.__setitem__("bench", n["bench"] + 1) or (True, 42.0, "out"))
+    lab.ensure_baseline()
+    check("baseline-single-when-disabled",
+          n == {"bench": 1} and lab.state["bench_baseline"] == 42.0, str(n))
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.state["base_sha"] = "abc123"
+    lab.build = lambda: (True, "ok")
+    calls = {"n": 0}
+    def _oneflake():
+        calls["n"] += 1
+        return (True, 42.0, "ok") if calls["n"] == 1 else (False, None, "flaked")
+    lab.bench = _oneflake
+    lab.ensure_baseline()
+    check("baseline-flake-keeps-first", lab.state["bench_baseline"] == 42.0,
+          str(lab.state.get("bench_baseline")))
 
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
