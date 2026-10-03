@@ -1903,7 +1903,8 @@ try:
                     "intent": {"area": "perf", "reason": "cpu gain"}},
                    {"number": 2, "title": "two", "score": 1},
                    {"number": 3, "title": "three", "score": 0,
-                    "files": ["src/a.cpp", "src/b.cpp"]}], open(cf60, "w"))
+                    "files": ["src/a.cpp", "src/b.cpp"],
+                    "ci_state": "success"}], open(cf60, "w"))
         sd60 = os.path.join(td60, "st"); os.makedirs(sd60)
         json.dump({"merged": [1], "quarantined": [2], "bench_baseline": None,
                    "batches_done": 0}, open(os.path.join(sd60, "lab-state.json"), "w"))
@@ -2127,6 +2128,42 @@ with tempfile.TemporaryDirectory() as td62:
                                       "base": "stable", "numbers": [71],
                                       "dry_run": True})
     check("gui-good-base-dry", st == 200, f"{st} {body[:150]}")
+
+# 65. diff preview per PR + CI column
+with tempfile.TemporaryDirectory() as td65:
+    repo = os.path.join(td65, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "preview/81")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\nadded\n")
+    _git(repo, "commit", "-am", "pr81")
+    _git(repo, "checkout", "master")
+    st, body = _post60("/api/preview", {"repo": repo, "base": "master",
+                                        "number": 81})
+    _p65 = json.loads(body)
+    check("gui-preview", st == 200 and "f.txt" in _p65.get("stat", "")
+          and "+added" in (_p65.get("diff", "") or ""), body[:300])
+    check("gui-preview-base", _p65.get("base") == "master")
+    st, _ = _post60("/api/preview", {"repo": repo, "base": "nope",
+                                     "number": 81})
+    check("gui-preview-badbase", st == 400, str(st))
+    st, _ = _post60("/api/preview", {"repo": repo, "base": "master",
+                                     "number": "81"})
+    check("gui-preview-badnum", st == 400, str(st))
+    st, _ = _post60("/api/preview", {"repo": repo, "base": "master",
+                                     "number": 82})
+    check("gui-preview-missing", st == 404, str(st))
+with tempfile.TemporaryDirectory() as td65b:
+    cf65 = os.path.join(td65b, "c.json")
+    json.dump([{"number": 7, "title": "t", "ci_state": "failure"}],
+              open(cf65, "w"))
+    st, body = _get60("/api/candidates?file=" + _up60.quote(cf65))
+    _c65 = json.loads(body)["candidates"][0]
+    check("gui-ci-column", st == 200 and _c65.get("ci") == "failure",
+          body[:200])
 
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:

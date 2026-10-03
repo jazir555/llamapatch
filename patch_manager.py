@@ -70,7 +70,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <button onclick="cancel()">Cancel run</button><button onclick="doctor()">Doctor</button><button onclick="report()">Report</button></div>
 <div class="row"><label>Filter <input id="flt" type="text" placeholder="text…" oninput="render()"></label>
 <label>Status <select id="fltstatus" onchange="render()"><option value="">all</option><option>pending</option><option>merged</option><option>quarantined</option></select></label></div>
-<table><thead><tr><th></th><th><a href="#" onclick="return sort('number')">PR</a></th><th><a href="#" onclick="return sort('title')">title</a></th><th><a href="#" onclick="return sort('score')">score</a></th><th>area</th><th>files</th><th>verdict</th><th><a href="#" onclick="return sort('status')">status</a></th></tr></thead>
+<table><thead><tr><th></th><th><a href="#" onclick="return sort('number')">PR</a></th><th><a href="#" onclick="return sort('title')">title</a></th><th><a href="#" onclick="return sort('score')">score</a></th><th>area</th><th>files</th><th>CI</th><th>verdict</th><th><a href="#" onclick="return sort('status')">status</a></th></tr></thead>
 <tbody id="rows"></tbody></table>
 <h2>Runs</h2><div class="row"><button onclick="runs()">Refresh</button></div><pre id="runs">(no runs)</pre>
 <h2>Log <span id="runid"></span></h2><pre id="log">(no run)</pre>
@@ -79,7 +79,8 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1;
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
 async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();ROWS=d.candidates;render()}
-function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number}</td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.verdict||''}</td><td>${c.status}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
+function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number} <button onclick="preview(${c.number})" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
+async function preview(n){const b={repo:val('repo'),base:val('base')||'master',number:n};const d=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('rep').textContent=`#${n} vs ${d.base}\n${d.stat}\n---\n${d.diff}`}
 async function release(ns){const b={candidates:val('cands'),state_dir:val('statedir'),numbers:ns};const r=await api('/api/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load()}
 async function doctor(){const b={candidates:val('cands'),repo:val('repo'),state_dir:val('statedir')};const r=await api('/api/doctor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 function sort(k){if(SORTK===k)SORTD*=-1;else{SORTK=k;SORTD=1}render();return false}
@@ -408,6 +409,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "intent_reason": intent.get("reason", ""),
                              "head": c.get("head", "") or "",
                              "files": files[:8], "file_count": len(files),
+                             "ci": c.get("ci_state", "") or "",
                              "verdict": b.get("verdict", ""),
                              "status": status})
             return _json(self, 200, {"candidates": rows, "state_dir": sd})
@@ -491,6 +493,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._release(body)
         if self.path == "/api/doctor":
             return self._doctor(body)
+        if self.path == "/api/preview":
+            return self._preview(body)
         if self.path.startswith("/api/runs/") and self.path.endswith("/cancel"):
             try:
                 rid = int(self.path.split("/")[3])
@@ -595,6 +599,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
                "--repo", repo, "--state-dir", sd, "--doctor"]
         rid = self._spawn("doctor", cmd, None, state_dir=sd)
         return _json(self, 200, {"id": rid})
+
+    def _preview(self, body):
+        """Diff a PR against the base without touching merge state. Fetches
+        into a dedicated preview/N namespace (never the loop's pr/N refs),
+        tolerating fetch failure when the ref already exists locally —
+        same resilience as the merge loop's own fetch."""
+        repo = (body.get("repo") or "").strip()
+        base = (body.get("base") or "master").strip() or "master"
+        n = body.get("number")
+        if not repo or not isinstance(n, int):
+            return _json(self, 400, {"error": "repo and int number required"})
+        if not self.app.verify_ref(repo, base):
+            return _json(self, 400,
+                         {"error": f"base ref {base!r} not found in {repo}"})
+        ref = f"preview/{n}"
+        frc = subprocess.run(["git", "-C", repo, "fetch", "origin",
+                              f"pull/{n}/head:{ref}", "--force"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, timeout=300)
+        if frc.returncode != 0 and not self.app.verify_ref(repo, ref):
+            return _json(self, 404, {"error": f"PR #{n} not fetchable: "
+                                              f"{(frc.stdout or '')[-300:]}"})
+        stat = subprocess.run(["git", "-C", repo, "diff", "--stat",
+                               f"{base}...{ref}"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=120)
+        diff = subprocess.run(["git", "-C", repo, "diff",
+                               f"{base}...{ref}", "--", "."],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=120)
+        if stat.returncode != 0:
+            return _json(self, 422, {"error": f"diff failed: "
+                                              f"{(stat.stdout or '')[-300:]}"})
+        lines = (diff.stdout or "").splitlines()
+        if len(lines) > 300:
+            lines = lines[:300] + [f"... ({len(lines) - 300} more lines)"]
+        return _json(self, 200, {"base": base, "stat": stat.stdout or "",
+                                 "diff": "\n".join(lines)})
 
 
 def serve(host="127.0.0.1", port=8123):
