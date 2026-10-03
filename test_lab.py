@@ -615,6 +615,94 @@ with tempfile.TemporaryDirectory() as td:
     lab.doctor()
     check("doctor-quiet-match", lab.doctor_warnings == [], str(lab.doctor_warnings))
 
+# 40. boundary bench verdicts get one confirmation run (noise guard)
+_g = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
+check("confirm-reg-boundary", M.needs_confirm(_g, 100, 83, 15, 5.0) is True)
+check("confirm-reg-clear", M.needs_confirm(_g, 100, 70, 15, 5.0) is False)
+check("confirm-imp-boundary", M.needs_confirm(_g, 100, 118, 15, 5.0) is True)
+check("confirm-imp-clear", M.needs_confirm(_g, 100, 130, 15, 5.0) is False)
+check("confirm-gainline-below", M.needs_confirm(_g, 100, 112, 15, 5.0) is True)
+check("confirm-parity-far-noexpect-rollback-stands",
+      M.needs_confirm(_g, 100, 100, 15, 5.0) is False)
+_nox = {"area": "perf", "backends": ["cuda"], "expects_bench_gain": False}
+check("confirm-noexpect-above", M.needs_confirm(_nox, 100, 118, 15, 5.0) is False)
+check("confirm-disabled", M.needs_confirm(_g, 100, 88, 15, 0) is False)
+check("confirm-nobase", M.needs_confirm(_g, 0, 88, 15, 5.0) is False)
+
+def _scripted(vals):
+    vals = list(vals)
+    def _b():
+        v = vals.pop(0) if len(vals) > 1 else vals[0]
+        return (True, v, f"v={v}")
+    return _b
+
+def _confirmlab(sd, model, repo):
+    # Local twin of _benchlab (defined later in file): same fake args +
+    # stubbed gates, but bound to a real mock repo for revert_last.
+    a = _mklab(repo, sd, [{"number": 77, "title": "t"}])
+    a.base = "master"; a.batch = 10; a.max_prs = 50
+    a.targets = ["t"]; a.build_type = "Release"; a.jobs = 2
+    a.smoke_model = ""; a.bench_model = model; a.pp = 32; a.tg = 32
+    a.regression_pct = 15; a.skip_ci_red = True
+    a.bench_noise_pct = 5.0
+    a.ppl_threshold = 0.0; a.ppl_sample = ""; a.build_timeout = 3600
+    lab = M.Lab(a)
+    lab.state["base_sha"] = "base1"
+    lab.state["bench_baseline"] = 40.0
+    lab.state["bench_baseline_sha"] = "base1"
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    return lab
+
+def _confirmrepo(td):
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "merged-pr")
+    return repo, sd
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.bench = _scripted([33.5, 40.0])  # boundary regression, then clean
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
+    check("confirm-saves-noisy-pr", lab.run_gates(77, intent) is True)
+    check("confirm-mean-stored",
+          lab.state["bench_results"]["77"]["runs"] == [33.5, 40.0]
+          and lab.state["bench_results"]["77"]["verdict"] == "parity",
+          str(lab.state["bench_results"].get("77")))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.bench = _scripted([30.0, 31.0])  # real regression, twice
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
+    check("confirm-upholds-real", lab.run_gates(77, intent) is False)
+    check("confirm-real-quarantined",
+          any(q["pr"] == 77 and q["reason"] == "perf-regression" for q in lab.quar),
+          str(lab.quar))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    calls = {"n": 0}
+    def _flake():
+        calls["n"] += 1
+        return (True, 33.5, "first") if calls["n"] == 1 else (False, None, "flaked")
+    lab.bench = _flake
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
+    check("confirm-flake-keeps-first", lab.run_gates(77, intent) is False)
+    check("confirm-flake-runs",
+          lab.state["bench_results"]["77"]["runs"] == [33.5],
+          str(lab.state["bench_results"].get("77")))
+
 # 23. quarantine dedup (retry cycles must not grow the file unboundedly)
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)

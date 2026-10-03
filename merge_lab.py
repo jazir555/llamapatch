@@ -29,7 +29,7 @@ combinatorial explosion across 1k PRs).
 import argparse, json, os, re, subprocess, time, datetime
 
 try:
-    from pr_intent import classify_intent, verdict_for
+    from pr_intent import classify_intent, needs_confirm, verdict_for
 except ImportError:  # pragma: no cover - standalone fallback
     def classify_intent(cand):
         return {"backends": [], "area": "other", "expects_bench_gain": False,
@@ -709,9 +709,31 @@ class Lab:
                          total=len(self.state["merged"]))
                 return True
             base = self.state.get("bench_baseline")
+            runs = [val]
+            if needs_confirm(intent, base, val, self.a.regression_pct,
+                             getattr(self.a, "bench_noise_pct", 5.0)):
+                # Boundary measurement: one confirmation run, verdict on the
+                # mean (halves the noise). A flaked confirm keeps the first
+                # run's verdict — extra data only overrides when collected.
+                self.log(event="bench-confirm", pr=n, first=val, base=base)
+                try:
+                    ok2, val2, bout2 = self.bench()
+                except Exception as e:
+                    self.log(event="bench-confirm-flake", pr=n,
+                             detail=str(e)[-300:])
+                else:
+                    if ok2 and val2 is not None:
+                        runs.append(val2)
+                        val = sum(runs) / len(runs)
+                        self.log(event="bench-confirmed", pr=n, runs=runs,
+                                 mean=val)
+                    else:
+                        self.log(event="bench-confirm-flake", pr=n,
+                                 detail=str(bout2)[-300:])
             verdict = verdict_for(intent, base, val, self.a.regression_pct)
             br = self.state.setdefault("bench_results", {})
             br[str(n)] = {"tg": val, "base": base, "verdict": verdict,
+                          "runs": runs,
                           "area": intent.get("area"),
                           "backends": intent.get("backends"),
                           "expects_gain": intent.get("expects_bench_gain")}
@@ -1140,6 +1162,9 @@ def main():
     ap.add_argument("--pp", type=int, default=32)
     ap.add_argument("--tg", type=int, default=32)
     ap.add_argument("--regression-pct", type=float, default=15.0)
+    ap.add_argument("--bench-noise-pct", type=float, default=5.0,
+                    help="boundary bench verdicts within this %% of their threshold "
+                    "line get one confirmation run (verdict on the mean); 0 disables")
     ap.add_argument("--skip-ci-red", dest="skip_ci_red", action="store_true", default=True)
     ap.add_argument("--no-skip-ci-red", dest="skip_ci_red", action="store_false")
     ap.add_argument("--ppl-threshold", type=float, default=0.0,

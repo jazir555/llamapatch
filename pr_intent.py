@@ -113,3 +113,27 @@ def verdict_for(intent, base, val, regression_pct):
     if val > base * (1 + regression_pct / 100):
         return "improvement" if intent.get("expects_bench_gain") else "parity"
     return "parity"
+
+
+def needs_confirm(intent, base, val, regression_pct, noise_pct=5.0):
+    """True when an action-taking verdict rests on a measurement within
+    noise_pct of its threshold line. Single bench runs are noisy: a
+    regression just under the line (revert+quarantine), an improvement
+    just over it (credit), or a parity just under the gain line (which
+    rolls back a claimed gain) each earn one confirmation run before the
+    tool acts. Clear results and no-op parity need no second run."""
+    try:
+        pct = float(regression_pct or 0)
+        noise = float(noise_pct or 0)
+    except (TypeError, ValueError):
+        return False
+    if not base or not val or pct <= 0 or noise <= 0:
+        return False
+    lo = base * (1 - pct / 100)    # regression line
+    hi = base * (1 + pct / 100)    # improvement line
+    band = base * noise / 100
+    if val < lo:
+        return val >= lo - band
+    if intent.get("expects_bench_gain") and abs(val - hi) <= band:
+        return True
+    return False
