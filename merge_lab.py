@@ -316,6 +316,7 @@ class Lab:
         else:
             self.quar = []
         self.doctor_warnings = []
+        self._smoke_green = False
 
     def save(self):
         # Quarantine file FIRST: a kill between the two writes must leave
@@ -699,6 +700,44 @@ class Lab:
             return False, f"ppl {val} > threshold {self.a.ppl_threshold}\n{out[-800:]}"
         return True, f"ppl {val}"
 
+    def _smoke_infra_ok(self):
+        """True when the clean tree smokes green. Rebuilds first: binaries
+        on disk belong to the just-reverted PR, so smoking them proves
+        nothing about infra. Only call when smoke never passed in this run
+        — the one case a smoke failure could be broken models/toolchain
+        instead of a broken PR."""
+        try:
+            okb, bout = self.build()
+            if not okb:
+                self.log(event="smoke-infra-build-fail", detail=str(bout)[-500:])
+                return False
+            oks, sout = self.smoke()
+            if not oks:
+                self.log(event="smoke-infra-fail", detail=str(sout)[-500:])
+            return bool(oks)
+        except Exception as e:
+            self.log(event="smoke-infra-error", detail=str(e)[-300:])
+            return False
+
+    def _handle_smoke_fail(self, n, detail, reason="smoke-failed"):
+        """Smoke gate failure: revert, then prove it's the PR. When smoke
+        never passed in this run the failure could be corrupt models or a
+        dead toolchain — rebuild the clean tree and smoke it; on infra
+        failure abort loudly WITHOUT quarantining (the PR is innocent),
+        leaving the reverted-but-listed commit for doctor to reconcile.
+        Once smoke has passed (here or via the infra check), later
+        failures are the PR's: quarantine as today."""
+        self.revert_last()
+        if not getattr(self, "_smoke_green", False):
+            self.log(event="smoke-first-failure", pr=n)
+            if not self._smoke_infra_ok():
+                raise RuntimeError(
+                    f"smoke infra broken (clean tree fails smoke); fix models/"
+                    f"toolchain and re-run — PR #{n} NOT quarantined")
+            self._smoke_green = True
+        self.quarantine(n, reason, detail[-2000:])
+        return False
+
     def maybe_confirm_bench(self, n, intent, base, val):
         """One confirmation run when val is a boundary measurement.
 
@@ -747,13 +786,11 @@ class Lab:
         try:
             oks, sout = self.smoke()
         except Exception as e:
-            self.revert_last()
-            self.quarantine(n, f"smoke-{gate_error_reason(e)}", str(e)[-2000:])
-            return False
+            return self._handle_smoke_fail(n, f"smoke-{gate_error_reason(e)}: {e}",
+                                           f"smoke-{gate_error_reason(e)}")
         if not oks:
-            self.revert_last()
-            self.quarantine(n, "smoke-failed", sout[-2000:])
-            return False
+            return self._handle_smoke_fail(n, sout)
+        self._smoke_green = True
         try:
             okp, pdetail = self.perplexity()
         except Exception as e:
@@ -997,6 +1034,18 @@ class Lab:
             if not oks:
                 culprit = remaining.pop()
                 self.revert_last()
+                if not getattr(self, "_smoke_green", False):
+                    # Same first-failure ambiguity as per-PR gates: with no
+                    # green smoke yet this run, the failure could be infra.
+                    # Abort loudly (culprit stays listed-but-reverted for
+                    # doctor) instead of burning a good PR as late-smoke.
+                    self.log(event="smoke-first-failure", pr=culprit, gate="final")
+                    if not self._smoke_infra_ok():
+                        raise RuntimeError(
+                            f"smoke infra broken (clean tree fails smoke); fix "
+                            f"models/toolchain and re-run — PR #{culprit} NOT "
+                            f"quarantined")
+                    self._smoke_green = True
                 self._drop_merged(culprit)
                 self._mark_late(culprit, "late-smoke-failed")
                 self.quarantine(culprit, "late-smoke-failed", str(sout)[-2000:])

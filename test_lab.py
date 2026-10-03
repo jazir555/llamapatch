@@ -281,6 +281,7 @@ with tempfile.TemporaryDirectory() as td:
     lab = _gatelab(repo, sd)
     lab.build = lambda: (True, "ok")
     lab.smoke = lambda: (False, "no throughput lines")
+    lab._smoke_green = True  # streak case: infra proven, failure is the PR's
     counted = lab.run_gates(99, {"area": "fix", "backends": [], "expects_bench_gain": False})
     check("smoke-fail-quarantined", counted is False)
     check("smoke-fail-reason",
@@ -1652,6 +1653,88 @@ with tempfile.TemporaryDirectory() as td55b:
     sd55b = os.path.join(td55b, "st"); os.makedirs(sd55b)
     a55b = _mklab(os.path.join(td55b, "norepo"), sd55b, [{"number": 1}])
     check("doctor-warnings-default", M.Lab(a55b).doctor_warnings == [])
+
+# 56. first-ever smoke failure verifies infra before blaming the PR
+_fix56 = {"area": "fix", "backends": [], "expects_bench_gain": False}
+def _smokes56(seq):
+    seq = list(seq)
+    def _s():
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+    return _s
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.smoke = _smokes56([(False, "nope"), (True, "tg32 : 40 t/s")])
+    lab.bench = lambda: (True, 40.0, "v=40")
+    check("smoke-infra-quarantines-pr", lab.run_gates(77, _fix56) is False)
+    check("smoke-infra-reason",
+          any(q["pr"] == 77 and q["reason"] == "smoke-failed" for q in lab.quar),
+          str(lab.quar))
+    check("smoke-infra-reverted", open(os.path.join(repo, "f.txt")).read() == "v1\n")
+    check("smoke-infra-flag", lab._smoke_green is True)
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.smoke = lambda: (False, "dead")
+    try:
+        lab.run_gates(77, _fix56)
+        check("smoke-infra-aborts", False, "must raise, not quarantine")
+    except RuntimeError as e:
+        check("smoke-infra-aborts", "NOT quarantined" in str(e), str(e)[:200])
+    check("smoke-infra-no-burn", lab.state["quarantined"] == [] and lab.quar == [])
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    lab.bench = lambda: (True, 40.0, "v=40")
+    check("smoke-streak-pass", lab.run_gates(77, _fix56) is True)
+    calls = {"build": 0}
+    _b = lab.build
+    lab.build = lambda: (calls.__setitem__("build", calls["build"] + 1) or _b())
+    lab.smoke = lambda: (False, "broke")
+    check("smoke-streak-fails-pr", lab.run_gates(78, _fix56) is False)
+    check("smoke-streak-no-reverify", calls == {"build": 1}, str(calls))
+    check("smoke-streak-quarantined",
+          any(q["pr"] == 78 and q["reason"] == "smoke-failed" for q in lab.quar),
+          str(lab.quar))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.smoke = lambda: (False, "dead")
+    lab.bench = lambda: (True, 40.0, "v=40")
+    lab.state["merged"] = [71]
+    try:
+        lab.final_verify_and_heal([71])
+        check("final-smoke-infra-aborts", False, "must raise, not quarantine")
+    except RuntimeError as e:
+        check("final-smoke-infra-aborts", "NOT" in str(e) and "quarantined" in str(e),
+              str(e)[:200])
+    check("final-smoke-no-burn",
+          lab.state["merged"] == [71] and lab.state["quarantined"] == [],
+          f"{lab.state['merged']} {lab.state['quarantined']}")
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.smoke = _smokes56([(False, "nope"), (True, "tg32 : 40 t/s")])
+    lab.bench = lambda: (True, 40.0, "v=40")
+    lab.state["merged"] = [71]
+    st, _ = lab.final_verify_and_heal([71])
+    check("final-smoke-heals-pr", st == "healed", st)
+    check("final-smoke-late-quar",
+          any(q["pr"] == 71 and q["reason"] == "late-smoke-failed" for q in lab.quar),
+          str(lab.quar))
 
 # 54. preflight refuses to burn a campaign on a missing smoke model
 with tempfile.TemporaryDirectory() as td:
