@@ -441,11 +441,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _body(self):
+    def _body(self, limit=1 << 20):
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = 0
+        if n > limit:
+            return "too-large"
         raw = self.rfile.read(n) if n > 0 else b""
         try:
             return json.loads(raw.decode() or "{}")
@@ -538,6 +540,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._body()
+        if body == "too-large":
+            return _json(self, 413, {"error": "body over 1MB"})
         if body is None:
             return _json(self, 400, {"error": "invalid JSON body"})
         if self.path == "/api/triage":

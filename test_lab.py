@@ -2355,6 +2355,15 @@ with tempfile.TemporaryDirectory() as td71:
     check("gui-real-report", "701" in _tail71 or "build-failed" in _tail71
           or "NOT quarantined" in _tail71, _tail71[-300:])
 
+# 72. oversized bodies rejected before reading
+_c72 = _hc60.HTTPConnection("127.0.0.1", _port60, timeout=30)
+_big72 = b"x" * ((1 << 20) + 1)
+_c72.request("POST", "/api/merge", _big72,
+             {"Content-Type": "application/json",
+              "Content-Length": str(len(_big72))})
+_r72 = _c72.getresponse()
+check("gui-body-cap", _r72.status == 413, str(_r72.status))
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")
