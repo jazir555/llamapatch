@@ -189,5 +189,44 @@ with tempfile.TemporaryDirectory() as td:
           and [q["pr"] for q in lab2.quar] == [102],
           f"{lab2.state['quarantined']} {lab2.quar}")
 
+# Scenario 3: strict improvement policy inside run(). PR 201 claims a gain
+# ("faster kernel" -> perf intent, no backend files -> expects_gain) but
+# benches parity, so the loop must revert it as no-improvement and merge
+# nothing. Proves only-measured-gains-stay end to end.
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo")
+    statedir = os.path.join(td, "state")
+    os.makedirs(repo); os.makedirs(statedir)
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.email", "t@t")
+    git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+    git(repo, "checkout", "-b", "pr/201")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\nfaster\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "pr201")
+    git(repo, "checkout", "master")
+
+    model = os.path.join(td, "m.gguf")
+    open(model, "w").write("x")
+    lab = make_lab(repo, statedir, [{"number": 201, "title": "faster kernel"}])
+    lab.a.batch = 10; lab.a.max_prs = 10
+    lab.a.bench_model = model
+    lab.a.regression_pct = 15
+    lab.build = lambda: (True, "mock build ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s mock")
+    lab.bench = lambda: (True, 40.0, "parity")
+    lab.run()
+    check("strict-merged-empty", lab.state["merged"] == [], str(lab.state["merged"]))
+    check("strict-quarantined", lab.state["quarantined"] == [201],
+          str(lab.state["quarantined"]))
+    check("strict-reason",
+          any(q["pr"] == 201 and q["reason"] == "no-improvement" for q in lab.quar),
+          str(lab.quar))
+    check("strict-tree-clean",
+          open(os.path.join(repo, "a.txt")).read() == "v1\n")
+    check("strict-baseline", lab.state["bench_baseline"] == 40.0,
+          str(lab.state.get("bench_baseline")))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
