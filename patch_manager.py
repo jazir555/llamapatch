@@ -262,6 +262,7 @@ class PatchApp:
                               "cmd": cmd, "log": log_path, "rc": None,
                               "pid": None, "state_dir": state_dir,
                               "cancel_note": ""}
+            self._prune_locked()
         def _bg():
             rc = 2
             proc = None
@@ -294,6 +295,23 @@ class PatchApp:
                 rec["rc"] = rc
         threading.Thread(target=_bg, daemon=True).start()
         return rid
+
+    def _prune_locked(self, keep=20):
+        """Retention: finished runs beyond the newest `keep` lose their
+        records AND log dirs (TEMP would otherwise grow one dir per run
+        forever). Never prune a running run."""
+        done = sorted((i for i, r in self.runs.items()
+                       if r.get("status") != "running"))
+        for i in done[:max(0, len(done) - keep)]:
+            rec = self.runs.pop(i, {})
+            try:
+                log = rec.get("log") or ""
+                d = os.path.dirname(log)
+                if d and os.path.basename(d).startswith("llamapatch-run-"):
+                    import shutil
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
 
     def cancel_run(self, rid):
         """Terminate the run's process tree, then clear OUR stale lock only:
@@ -387,14 +405,27 @@ class PatchApp:
         if not rec:
             return None
         rec.pop("proc", None)  # Popen handle is not JSON-serializable
-        try:
-            with open(rec["log"]) as f:
-                lines = f.read().splitlines()
-            tail = "\n".join(lines[-200:])
-        except Exception as e:
-            tail = f"(log unavailable: {e})"
-        rec["log_tail"] = tail
+        rec["log_tail"] = self.tail_log(rec.get("log", ""))
         return rec
+
+    @staticmethod
+    def tail_log(path, max_bytes=65536, max_lines=200):
+        """Last lines without reading the whole file: a 50-merge run's log
+        is megabytes of bench output; polling it every second must not
+        load it all into memory each time."""
+        try:
+            size = os.path.getsize(path)
+        except Exception as e:
+            return f"(log unavailable: {e})"
+        try:
+            with open(path, "rb") as f:
+                f.seek(max(0, size - max_bytes))
+                chunk = f.read().decode("utf-8", "replace")
+            if size > max_bytes:
+                chunk = chunk.split("\n", 1)[-1]  # drop partial first line
+            return "\n".join(chunk.splitlines()[-max_lines:])
+        except Exception as e:
+            return f"(log unavailable: {e})"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

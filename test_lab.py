@@ -2242,6 +2242,38 @@ with tempfile.TemporaryDirectory() as td67:
     check("sh-path-drive",
           PM._sh_path("C:\\a\\b") == ("/mnt/c/a/b" if PM._is_wsl_bash() else "C:/a/b"))
 
+# 68. bounded log tails + run retention
+with tempfile.TemporaryDirectory() as td68:
+    big = os.path.join(td68, "big.log")
+    with open(big, "w") as f:
+        for i in range(3000):
+            f.write(f"line {i:04d} " + "x" * 60 + "\n")
+    _tail68 = PM.PatchApp.tail_log(big)
+    _lines68 = _tail68.splitlines()
+    check("tail-bounded", len(_lines68) == 200, str(len(_lines68)))
+    check("tail-current", _lines68[-1].startswith("line 2999"), _lines68[-1][:20])
+    check("tail-whole-lines", _lines68[0].startswith("line "), _lines68[0][:20])
+    small = os.path.join(td68, "small.log")
+    open(small, "w").write("a\nb\n")
+    check("tail-small", PM.PatchApp.tail_log(small) == "a\nb")
+    check("tail-missing", PM.PatchApp.tail_log(os.path.join(td68, "nope")).startswith("(log unavailable"))
+    _app68 = PM.PatchApp()
+    for _i68 in range(1, 26):
+        _app68.runs[_i68] = {"id": _i68, "kind": "test", "status": "done",
+                             "cmd": [], "log": os.path.join(td68, f"{_i68}.log"),
+                             "rc": 0, "pid": None, "state_dir": "",
+                             "cancel_note": ""}
+    _app68.seq = 25
+    _log68 = os.path.join(td68, "run.log")
+    _id68 = _app68.start_run("test", [sys.executable, "-c", "pass"], _log68)
+    _fin68 = [i for i, r in _app68.runs.items() if r.get("status") != "running"]
+    check("prune-keeps-running", _id68 in _app68.runs)
+    check("prune-bounded", len(_fin68) <= 20, str(len(_fin68)))
+    for _ in range(100):
+        if _app68.runs[_id68].get("status") != "running":
+            break
+        _t60.sleep(0.1)
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")
