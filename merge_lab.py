@@ -215,6 +215,12 @@ def build_report(state, quar, cands):
                 L.append(f"| #{q.get('pr', '?')} | {q.get('reason', '?')} | "
                          f"{(q.get('detail', '') or '')[:80]} |")
     L.append("")
+    dw = state.get("doctor_warnings", []) or []
+    if dw:
+        L.append("## doctor warnings")
+        for w in dw:
+            L.append(f"- {w}")
+        L.append("")
     gains = [n for n in merged
              if isinstance(bench, dict) and bench.get(str(n), {}).get("verdict") == "improvement"]
     if gains:
@@ -1167,6 +1173,10 @@ class Lab:
                          f"(branch moved after merge)")
                     print(f"doctor: WARNING {w}")
                     self.doctor_warnings.append(w)
+        # Persist warnings: they are print-only otherwise, lost after the
+        # run — the report (the artifact operators actually read) renders
+        # them from state.
+        self.state["doctor_warnings"] = list(self.doctor_warnings)
         self.state["quarantined"] = [n for n in self.state["quarantined"] if n not in requeued]
         self.quar = fixed_quar
         self.save()

@@ -1267,5 +1267,37 @@ with tempfile.TemporaryDirectory() as td:
     check("baseline-flake-keeps-first", lab.state["bench_baseline"] == 42.0,
           str(lab.state.get("bench_baseline")))
 
+# 43. doctor warnings persist into state and render in the report
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 7, "title": "seven"}])
+    a.base = "master"
+    lab = M.Lab(a)
+    lab.state["base_sha"] = _git(repo, "rev-parse", "HEAD")[1].strip()
+    _git(repo, "checkout", "-b", "pr/7")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "pr7")
+    _git(repo, "checkout", "master")
+    _git(repo, "merge", "--no-ff", "--no-edit", "pr/7")
+    _git(repo, "commit", "--amend", "-m", "pr-lab: merge #7 seven")
+    lab.state["merged"] = [7]
+    lab.state["merged_heads"] = {"7": "0" * 40}  # wrong on purpose
+    lab.save()
+    lab.doctor()
+    check("doctor-warnings-persisted",
+          lab.state.get("doctor_warnings") == lab.doctor_warnings
+          and any("#7" in w for w in lab.doctor_warnings),
+          str(lab.state.get("doctor_warnings")))
+    rep = M.build_report(lab.state, [], [{"number": 7, "title": "seven"}])
+    check("report-warnings-section",
+          "## doctor warnings" in rep and "#7 tree parent" in rep)
+    check("report-no-warnings-quiet",
+          "## doctor warnings" not in M.build_report({"merged": []}, [], []))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
