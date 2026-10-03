@@ -112,6 +112,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <tbody id="rows"></tbody></table>
 <h2>Runs</h2><div class="row"><button onclick="safe(runs)">Refresh</button></div><pre id="runs">(no runs)</pre>
 <h2>Log <span id="runid"></span></h2><pre id="log">(no run)</pre>
+<h2>Result</h2><pre id="result">(no merge yet)</pre>
 <h2>Report</h2><pre id="rep">(no report)</pre>
 <script>
 let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1, PENDINGOUT=null;
@@ -119,7 +120,7 @@ function err(m){document.getElementById('err').textContent=m||''}
 function busy(v){document.getElementById('mbtn').disabled=v;document.getElementById('dbtn').disabled=v}
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
 async function safe(fn){try{err('');await fn()}catch(e){err('Error: '+e.message)}}
-async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();ROWS=d.candidates;render()}
+async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();if(!val('statedir')&&d.state_dir)document.getElementById('statedir').value=d.state_dir;ROWS=d.candidates;render()}
 function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks();updCount()"></td><td>#${c.number} <button onclick="safe(()=>preview(${c.number}))" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.quar_reason?` (${esc(c.quar_reason)})`:''}${c.status==='quarantined'?` <button onclick="safe(()=>release([${c.number}]))">release</button>`:''}</td>`;tb.appendChild(tr)}updCount()}
 async function preview(n){const b={repo:val('repo'),base:val('base')||'master',number:n};const d=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('rep').textContent=`#${n} vs ${d.base}\n${d.stat}\n---\n${d.diff}`}
 async function release(ns){const b={candidates:val('cands'),state_dir:val('statedir'),numbers:ns};const r=await api('/api/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load()}
@@ -144,7 +145,8 @@ async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);const t=await r.text();if(!r.ok)throw new Error(t.slice(0,300));document.getElementById('rep').textContent=t}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
 function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;busy(true);clearInterval(TIMER);TIMER=setInterval(()=>poll().catch(e=>err('Error: '+e.message)),1000);poll().catch(e=>err('Error: '+e.message))}
-async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);busy(false);if(PENDINGOUT){document.getElementById('cands').value=PENDINGOUT;PENDINGOUT=null;await load()}else{await load()}await report()}}
+async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);busy(false);if(PENDINGOUT){document.getElementById('cands').value=PENDINGOUT;PENDINGOUT=null;await load()}else{await load()}await report();await result()}}
+async function result(){const q=new URLSearchParams({repo:val('repo'),state_dir:val('statedir')});try{const d=await api('/api/result?'+q);document.getElementById('result').textContent=`branch ${d.branch||'?'} @ ${d.head||'?'} (base ${(d.base||'').slice(0,8)})\nmerged: ${(d.merged||[]).join(', ')||'(none)'}\n${d.stat||''}`}catch(e){document.getElementById('result').textContent='(result unavailable: '+e.message+')'}}
 </script></body></html>
 """
 
@@ -262,6 +264,37 @@ class PatchApp:
         except Exception:
             return False
         return p.returncode == 0
+
+    def merge_result(self, repo, state_dir):
+        """What the merges produced: working branch, HEAD, merged count,
+        and diffstat vs the base the campaign started from. All errors
+        become messages."""
+        if not repo:
+            return None, "repo checkout path required"
+        if not os.path.isdir(repo):
+            return None, f"repo dir missing: {repo}"
+        state, _, _, merged = self.load_state(state_dir)
+        branch = state.get("branch", "") if isinstance(state, dict) else ""
+        base = state.get("base_sha", "") if isinstance(state, dict) else ""
+        def _run(args):
+            try:
+                p = subprocess.run(["git", "-C", repo] + args,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True,
+                                   timeout=120)
+            except Exception as e:
+                return None
+            return (p.stdout or "") if p.returncode == 0 else None
+        head = _run(["rev-parse", "--short", "HEAD"]) or ""
+        stat = ""
+        if base:
+            stat = _run(["diff", "--stat", f"{base}...HEAD"]) or ""
+        lines = stat.splitlines()
+        if len(lines) > 40:
+            lines = lines[:40] + [f"... ({len(lines) - 40} more files)"]
+        return {"branch": branch or "", "head": (head or "").strip(),
+                "merged": merged or [], "base": (base or "")[:8],
+                "stat": "\n".join(lines)}, None
 
     # -- runs -----------------------------------------------------------
     def start_run(self, kind, cmd, log_path, env=None, state_dir=""):
@@ -551,6 +584,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return _text(self, 200, rep, "text/markdown; charset=utf-8")
         if u.path == "/api/refs":
             info, err = self.app.git_refs(q.get("repo", ""))
+            if err:
+                return _json(self, 400, {"error": err})
+            return _json(self, 200, info)
+        if u.path == "/api/result":
+            info, err = self.app.merge_result(q.get("repo", ""),
+                                              q.get("state_dir", ""))
             if err:
                 return _json(self, 400, {"error": err})
             return _json(self, 200, info)

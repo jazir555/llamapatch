@@ -2308,6 +2308,33 @@ with tempfile.TemporaryDirectory() as td70:
           and any("f.txt" in s for s in _r70.get("dirty_sample", [])),
           body[:300])
 
+# 74. result summary: branch, HEAD, merged list, diffstat vs base
+with tempfile.TemporaryDirectory() as td74:
+    repo = os.path.join(td74, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _base74 = _git(repo, "rev-parse", "HEAD")[1].strip()
+    _git(repo, "checkout", "-b", "pr-lab/base-test")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\nmerged\n")
+    _git(repo, "commit", "-am", "pr-lab: merge #91 x")
+    sd74 = os.path.join(td74, "st"); os.makedirs(sd74)
+    json.dump({"merged": [91], "quarantined": [], "branch": "pr-lab/base-test",
+               "base_sha": _base74},
+              open(os.path.join(sd74, "lab-state.json"), "w"))
+    st, body = _get60("/api/result?repo=" + _up60.quote(repo)
+                      + "&state_dir=" + _up60.quote(sd74))
+    _r74 = json.loads(body)
+    check("gui-result", st == 200 and _r74.get("branch") == "pr-lab/base-test"
+          and _r74.get("merged") == [91] and _r74.get("base") == _base74[:8]
+          and len(_r74.get("head", "")) >= 7 and "f.txt" in _r74.get("stat", ""),
+          body[:300])
+    st, _ = _get60("/api/result?repo=" + _up60.quote(os.path.join(td74, "nope"))
+                   + "&state_dir=" + _up60.quote(sd74))
+    check("gui-result-missing", st == 400, str(st))
+
 # 71. GUI drives the real merge loop: mock repo, unbuildable project ->
 # build-failed quarantine propagates through HTTP into state + report.
 with tempfile.TemporaryDirectory() as td71:
