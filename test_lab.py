@@ -1299,5 +1299,23 @@ with tempfile.TemporaryDirectory() as td:
     check("report-no-warnings-quiet",
           "## doctor warnings" not in M.build_report({"merged": []}, [], []))
 
+# 44. fallback without triaged head_full merges (unenriched candidates skip
+# the freshness check instead of blocking on it)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "pr/6")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "pr6")
+    _git(repo, "checkout", "master")
+    a = _mklab(repo, sd, [{"number": 6, "title": "nohead"}])  # no head_full
+    lab = M.Lab(a)
+    ok, reason = lab.merge_one_committed(6, "batch-0")
+    check("missing-head-skips-check", ok, str(reason))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

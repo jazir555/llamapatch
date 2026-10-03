@@ -25,7 +25,7 @@ python3 -u "$HERE/merge_lab.py" \
   --batch 10 --max-prs 50 \
   --smoke-model ~/llama-pr-lab/models/tinyllama.gguf \
   --bench-model ~/llama-pr-lab/models/qwen2.5-7b-00001-of-00002.gguf \
-  --pp 32 --tg 32 --regression-pct 15 2>&1 | tee run-1k.log
+  --pp 32 --tg 32 --regression-pct 15 "$@" 2>&1 | tee run-1k.log
 
 echo "== evidence report (review what each batch proved) =="
 python3 -u "$HERE/merge_lab.py" \
