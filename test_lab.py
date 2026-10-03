@@ -2128,6 +2128,47 @@ with tempfile.TemporaryDirectory() as td62:
                                       "dry_run": True})
     check("gui-good-base-dry", st == 200, f"{st} {body[:150]}")
 
+# 63. merge tuning passthrough, runs list, page JS parses under node
+with tempfile.TemporaryDirectory() as td63:
+    cf63 = os.path.join(td63, "c.json")
+    json.dump([{"number": 11, "title": "a"}, {"number": 12, "title": "b"}],
+              open(cf63, "w"))
+    sd63 = os.path.join(td63, "st")
+    st, body = _post60("/api/merge", {"candidates": cf63, "repo": td63,
+                                      "state_dir": sd63, "numbers": [11, 12],
+                                      "dry_run": True, "batch": 1, "max_prs": 10})
+    _mid63 = json.loads(body).get("id")
+    _done63, _tail63 = False, ""
+    for _ in range(60):
+        _t60.sleep(0.5)
+        st, body = _get60(f"/api/runs/{_mid63}")
+        _r63 = json.loads(body)
+        if _r63.get("status") != "running":
+            _done63 = _r63.get("status") == "done"
+            _tail63 = _r63.get("log_tail", "")
+            break
+    check("gui-tuning-batches",
+          _done63 and "batch: [11]" in _tail63 and "batch: [12]" in _tail63,
+          _tail63[-250:])
+    st, body = _get60("/api/runs")
+    _runs63 = json.loads(body).get("runs", [])
+    check("gui-runs-list",
+          st == 200 and any(r.get("id") == _mid63 and r.get("kind") == "merge"
+                            for r in _runs63)
+          and all({"id", "kind", "status"} <= set(r) for r in _runs63),
+          body[:250])
+_node63 = _shutil.which("node")
+if _node63:
+    with tempfile.TemporaryDirectory() as td63b:
+        _js63 = PM.PAGE.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        _jf63 = os.path.join(td63b, "page.js")
+        open(_jf63, "w").write(_js63)
+        _nr63 = _sp3.run([_node63, "--check", _jf63], capture_output=True,
+                         text=True, timeout=60)
+        check("gui-js-parses", _nr63.returncode == 0, _nr63.stderr[:300])
+else:
+    check("gui-js-parses", True, "node absent, skipped")
+
 _srv60.shutdown()
 _srv60.server_close()
 
