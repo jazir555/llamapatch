@@ -328,5 +328,50 @@ with tempfile.TemporaryDirectory() as td:
           and br.get("verdict") == "parity", str(br))
     check("confirm-e2e-logged", '"bench-confirmed"' in open(lab.log_f).read())
 
+# Scenario 6: infra abort end to end. Smoke fails on the first PR and on
+# the clean tree too (dead toolchain model): run() must raise WITHOUT
+# quarantining, release the lock, and leave resume possible. Fixing smoke
+# then merges the PR on the next run.
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo")
+    statedir = os.path.join(td, "state")
+    os.makedirs(repo); os.makedirs(statedir)
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.email", "t@t")
+    git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+    git(repo, "checkout", "-b", "pr/501")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\nfixed\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "pr501")
+    git(repo, "checkout", "master")
+
+    lab = make_lab(repo, statedir, [{"number": 501, "title": "fix thing"}])
+    lab.a.batch = 10; lab.a.max_prs = 10
+    lab.a.bench_model = ""
+    lab.a.regression_pct = 0
+    lab.build = lambda: (True, "mock build ok")
+    lab.smoke = lambda: (False, "dead")
+    try:
+        lab.run()
+        check("abort-raises", False, "run must raise on broken smoke infra")
+    except RuntimeError as e:
+        check("abort-raises", "NOT quarantined" in str(e), str(e)[:150])
+    check("abort-unburned", lab.state["merged"] == []
+          and lab.state["quarantined"] == [] and lab.quar == [],
+          f"{lab.state['merged']} {lab.state['quarantined']}")
+    check("abort-lock-released",
+          not os.path.exists(os.path.join(statedir, "lab.lock")))
+    # operator fixes infra; resume merges cleanly with no stale lock fight.
+    lab2 = make_lab(repo, statedir, [{"number": 501, "title": "fix thing"}])
+    lab2.a.batch = 10; lab2.a.max_prs = 10
+    lab2.a.bench_model = ""
+    lab2.a.regression_pct = 0
+    lab2.build = lambda: (True, "mock build ok")
+    lab2.smoke = lambda: (True, "tg32 : 40 t/s mock")
+    lab2.run()
+    check("abort-resume-merges", lab2.state["merged"] == [501],
+          str(lab2.state["merged"]))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
