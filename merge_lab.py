@@ -179,6 +179,15 @@ def build_report(state, quar, cands):
          f"pending: {pending_n} | batches: {state.get('batches_done', 0)} | "
          f"baseline tg: {base} @ {base_sha}",
          f""]
+    late = []
+    for q in quar:
+        if isinstance(q, dict) and str(q.get("reason", "")).startswith("late-") \
+           and q.get("pr") not in late:
+            late.append(q.get("pr"))
+    if late:
+        L.append(f"- post-run healed (regressions caught AFTER merges): "
+                 f"{', '.join(f'#{n}' for n in late)}")
+        L.append(f"")
     L.append("## merged")
     if not merged:
         L.append("(none yet)")
@@ -911,7 +920,6 @@ class Lab:
         self.setup_branch()
         self.clean_tree()
         self.ensure_clean_start()
-        print(f"pending: {len(pending)} (merged={len(self.state['merged'])} quar={len(self.state['quarantined'])})", flush=True)
         if self.a.doctor:
             self.doctor()
             return
@@ -922,7 +930,6 @@ class Lab:
         done = 0
         i = 0
         cand_by_num = {c["number"]: c for c in self.cands}
-        batch_files: set = set()
         while i < len(pending) and done < self.a.max_prs:
             batch = [n for n in pending[i:i+self.a.batch]
                      if n not in self.state["quarantined"]]

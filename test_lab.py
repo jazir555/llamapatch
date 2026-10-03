@@ -963,5 +963,15 @@ with tempfile.TemporaryDirectory() as td:
           calls == {"build": 1, "bench": 1} and lab.state["bench_baseline"] == 99.0,
           f"{calls} {lab.state.get('bench_baseline')}")
 
+# 34. report surfaces post-run heals (caught AFTER merges, not at merge time)
+_rq = [{"pr": 72, "reason": "late-regression", "detail": "30 vs 40"},
+       {"pr": 73, "reason": "merge-conflict", "detail": "x"}]
+_rep = M.build_report({"merged": [71], "quarantined": [72, 73], "batches_done": 1},
+                      _rq, [{"number": 71}, {"number": 72}, {"number": 73}])
+check("report-late-healed", "post-run healed" in _rep and "#72" in _rep
+      and "#73" not in _rep.split("post-run healed")[1].split("\n")[0])
+check("report-no-late",
+      "post-run healed" not in M.build_report({"merged": [71]}, [], [{"number": 71}]))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
