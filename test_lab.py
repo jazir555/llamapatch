@@ -1899,9 +1899,11 @@ try:
     with tempfile.TemporaryDirectory() as td60:
         cf60 = os.path.join(td60, "c.json")
         json.dump([{"number": 1, "title": "one", "score": 5,
-                    "intent": {"area": "perf"}},
+                    "head": "aa11",
+                    "intent": {"area": "perf", "reason": "cpu gain"}},
                    {"number": 2, "title": "two", "score": 1},
-                   {"number": 3, "title": "three", "score": 0}], open(cf60, "w"))
+                   {"number": 3, "title": "three", "score": 0,
+                    "files": ["src/a.cpp", "src/b.cpp"]}], open(cf60, "w"))
         sd60 = os.path.join(td60, "st"); os.makedirs(sd60)
         json.dump({"merged": [1], "quarantined": [2], "bench_baseline": None,
                    "batches_done": 0}, open(os.path.join(sd60, "lab-state.json"), "w"))
@@ -1913,6 +1915,13 @@ try:
               st == 200 and {c["number"]: c["status"] for c in _d60["candidates"]}
               == {1: "merged", 2: "quarantined", 3: "pending"}, body[:300])
         check("gui-area", [c for c in _d60["candidates"] if c["number"] == 1][0]["area"] == "perf")
+        _r360 = {c["number"]: c for c in _d60["candidates"]}
+        check("gui-row-detail", _r360[1]["head"] == "aa11"
+              and _r360[1]["intent_reason"] == "cpu gain"
+              and _r360[3]["files"] == ["src/a.cpp", "src/b.cpp"]
+              and _r360[3]["file_count"] == 2
+              and _r360[2]["files"] == [] and _r360[2]["file_count"] == 0,
+              str(_r360))
         st, _ = _get60("/api/candidates?file=" + os.path.join(td60, "nope.json"))
         check("gui-missing", st == 404, str(st))
         bad60 = os.path.join(td60, "bad.json")

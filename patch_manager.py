@@ -65,20 +65,26 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <div class="row"><button onclick="checkAll(true)">All</button><button onclick="checkAll(false)">None</button>
 <button onclick="merge(false)">Merge selected</button><button onclick="merge(true)">Dry run</button>
 <button onclick="cancel()">Cancel run</button><button onclick="report()">Report</button></div>
-<table><thead><tr><th></th><th>PR</th><th>title</th><th>score</th><th>area</th><th>verdict</th><th>status</th></tr></thead>
+<table><thead><tr><th></th><th>PR</th><th>title</th><th>score</th><th>area</th><th>files</th><th>verdict</th><th>status</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <h2>Log <span id="runid"></span></h2><pre id="log">(no run)</pre>
 <h2>Report</h2><pre id="rep">(no report)</pre>
 <script>
 let RUN=null, TIMER=null;
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
-async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);const tb=document.getElementById('rows');tb.innerHTML='';for(const c of d.candidates){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${c.status==='pending'?'checked':''} ${c.status!=='pending'?'disabled':''}></td><td>#${c.number}</td><td>${esc(c.title||'')}</td><td>${c.score??''}</td><td>${c.area||''}</td><td>${c.verdict||''}</td><td>${c.status}</td>`;tb.appendChild(tr)}}
+async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();for(const c of d.candidates){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number}</td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.verdict||''}</td><td>${c.status}</td>`;tb.appendChild(tr)}}
+function selKey(){return 'llamapatch-sel:'+val('cands')}
+function savedChecks(){try{const s=JSON.parse(localStorage.getItem(selKey())||'null');return Array.isArray(s)?new Set(s):null}catch(e){return null}}
+function saveChecks(){try{localStorage.setItem(selKey(),JSON.stringify(selected()))}catch(e){}}
+function saveFields(){try{localStorage.setItem('llamapatch-fields',JSON.stringify({slug:val('slug'),repo:val('repo'),base:val('base'),cands:val('cands'),statedir:val('statedir')}))}catch(e){}}
+function restoreFields(){try{const f=JSON.parse(localStorage.getItem('llamapatch-fields')||'null');if(!f)return;for(const k of ['slug','repo','base','cands','statedir']){if(f[k]!==undefined)document.getElementById(k).value=f[k]}}catch(e){}}
+restoreFields();
 function val(id){return document.getElementById(id).value.trim()}
 function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
-function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:disabled)').forEach(c=>c.checked=v)}
+function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:disabled)').forEach(c=>c.checked=v);saveChecks()}
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
 async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:false};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
-async function merge(dry){const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
+async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
 function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;clearInterval(TIMER);TIMER=setInterval(poll,1000);poll()}
@@ -339,10 +345,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 b = bench.get(str(n), {}) if isinstance(bench, dict) else {}
                 status = ("merged" if n in merged else
                           "quarantined" if n in qset else "pending")
+                intent = c.get("intent")
+                intent = intent if isinstance(intent, dict) else {}
+                files = c.get("files", []) or []
                 rows.append({"number": n, "title": c.get("title", ""),
                              "score": c.get("score"),
-                             "area": (c.get("intent") or {}).get("area", "")
-                             if isinstance(c.get("intent"), dict) else "",
+                             "area": intent.get("area", ""),
+                             "intent_reason": intent.get("reason", ""),
+                             "head": c.get("head", "") or "",
+                             "files": files[:8], "file_count": len(files),
                              "verdict": b.get("verdict", ""),
                              "status": status})
             return _json(self, 200, {"candidates": rows, "state_dir": sd})
