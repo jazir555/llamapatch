@@ -21,6 +21,7 @@
   "bench_tg": 32,
   "regression_threshold_pct": 15.0,
   "improvement_threshold_pct": 15.0,
+  "bench_noise_pct": 5.0,
   "skip_ci_red": true,
   "ppl_threshold": 0.0,
   "perf_keywords": ["perf", "speed", "faster", "optimi", "accelerat", "flash", "quant", "cuda", "vulkan", "metal", "avx", "neon", "sve", "sme", "blas", "bench", "throughput", "latency", "cache", "prefill", "decode", "speculat", "draft", "mtp", "parallel", "thread", "simd", "int8", "fp16", "bf16", "mla", "attn", "kernel", "graph", "mmap", "mem"],

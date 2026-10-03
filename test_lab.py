@@ -1317,5 +1317,19 @@ with tempfile.TemporaryDirectory() as td:
     ok, reason = lab.merge_one_committed(6, "batch-0")
     check("missing-head-skips-check", ok, str(reason))
 
+# 45. threshold + wrapper consistency (drift between knobs breaks campaigns)
+_here45 = os.path.dirname(os.path.abspath(__file__))
+_ml45 = open(os.path.join(_here45, "merge_lab.py")).read()
+_triage45 = open(os.path.join(_here45, "triage-1k.sh")).read()
+_dispatcher45 = open(os.path.join(_here45, "llamapatch")).read()
+_cfg45 = json.load(open(os.path.join(_here45, "config.json")))
+check("config-noise-knob", _cfg45.get("bench_noise_pct") == 5.0, str(_cfg45.get("bench_noise_pct")))
+check("config-noise-default-match", "--bench-noise-pct" in _ml45
+      and "default=5.0" in _ml45)
+check("triage-forwards-flags",
+      _triage45.count('"$@"') >= 1, "merge line must forward operator flags")
+check("dispatcher-forwards-flags",
+      _dispatcher45.count('"$@"') >= 3, "merge/dry/doctor/report forward flags")
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
