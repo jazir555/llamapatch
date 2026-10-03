@@ -259,6 +259,7 @@ with tempfile.TemporaryDirectory() as td:
     def _hung(*a, **k):
         raise _sp2.TimeoutExpired("cmake --build", 3600)
     lab.build = _hung
+    lab._build_ok = True  # streak case: infra proven, failure is the PR's
     intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
     counted = lab.run_gates(99, intent)
     check("build-timeout-quarantined", counted is False)
@@ -1109,6 +1110,7 @@ with tempfile.TemporaryDirectory() as td:
     lab.build = lambda: (False, "boom")
     lab.smoke = lambda: (True, "tg32 ok")
     lab.bench = lambda: (True, 40.0, "x")
+    lab._build_ok = True  # streak case: infra proven, failure marks the PR
     lab.state["merged"] = [71]
     lab.state["bench_results"] = {"71": {"tg": 48.0, "verdict": "improvement"}}
     st, _ = lab.final_verify_and_heal([71])
@@ -1734,6 +1736,69 @@ with tempfile.TemporaryDirectory() as td:
     check("final-smoke-heals-pr", st == "healed", st)
     check("final-smoke-late-quar",
           any(q["pr"] == 71 and q["reason"] == "late-smoke-failed" for q in lab.quar),
+          str(lab.quar))
+
+# 57. first-ever build failure verifies infra before blaming the PR
+def _builds57(seq):
+    seq = list(seq)
+    def _b():
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+    return _b
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.build = _builds57([(False, "boom"), (True, "ok")])
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    lab.bench = lambda: (True, 40.0, "v=40")
+    check("build-infra-quarantines-pr", lab.run_gates(77, _fix56) is False)
+    check("build-infra-reason",
+          any(q["pr"] == 77 and q["reason"] == "build-failed" for q in lab.quar),
+          str(lab.quar))
+    check("build-infra-flag", lab._build_ok is True)
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.build = lambda: (False, "no cmake")
+    try:
+        lab.run_gates(77, _fix56)
+        check("build-infra-aborts", False, "must raise, not quarantine")
+    except RuntimeError as e:
+        check("build-infra-aborts", "NOT quarantined" in str(e), str(e)[:200])
+    check("build-infra-no-burn", lab.state["quarantined"] == [] and lab.quar == [])
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _confirmlab(sd, model, repo)
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    lab.bench = lambda: (True, 40.0, "v=40")
+    check("build-streak-pass", lab.run_gates(77, _fix56) is True)
+    calls = {"build": 0}
+    _bb = lab.build
+    lab.build = lambda: (calls.__setitem__("build", calls["build"] + 1)
+                         or (False, "boom"))
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    check("build-streak-fails-pr", lab.run_gates(78, _fix56) is False)
+    check("build-streak-no-reverify", calls == {"build": 1}, str(calls))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd = _confirmrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.build = _builds57([(False, "boom"), (True, "ok")])
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 40.0, "parity")
+    lab.state["merged"] = [71]
+    st, _ = lab.final_verify_and_heal([71])
+    check("final-build-heals-pr", st == "healed", st)
+    check("final-build-late-quar",
+          any(q["pr"] == 71 and q["reason"] == "late-build-failed" for q in lab.quar),
           str(lab.quar))
 
 # 54. preflight refuses to burn a campaign on a missing smoke model

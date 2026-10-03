@@ -317,6 +317,7 @@ class Lab:
             self.quar = []
         self.doctor_warnings = []
         self._smoke_green = False
+        self._build_ok = False
 
     def save(self):
         # Quarantine file FIRST: a kill between the two writes must leave
@@ -719,6 +720,28 @@ class Lab:
             self.log(event="smoke-infra-error", detail=str(e)[-300:])
             return False
 
+    def _handle_build_fail(self, n, bout, reason="build-failed"):
+        """Build gate failure: revert, then prove it's the PR. When no build
+        has succeeded in this run the failure could be a dead toolchain or
+        full disk — rebuild the clean tree; on infra failure abort loudly
+        WITHOUT quarantining, on success quarantine the PR. (Baseline and
+        passing gates set _build_ok; after that, failures are the PR's.)"""
+        self.revert_last()
+        if not getattr(self, "_build_ok", False):
+            self.log(event="build-first-failure", pr=n)
+            try:
+                okb, bout2 = self.build()
+            except Exception as e:
+                okb, bout2 = False, f"build-{gate_error_reason(e)}: {e}"
+            if not okb:
+                raise RuntimeError(
+                    f"build infra broken (clean tree fails build: "
+                    f"{str(bout2)[-500:]}); fix toolchain/disk and re-run — "
+                    f"PR #{n} NOT quarantined")
+            self._build_ok = True
+        self.quarantine(n, reason, str(bout)[-2000:])
+        return False
+
     def _handle_smoke_fail(self, n, detail, reason="smoke-failed"):
         """Smoke gate failure: revert, then prove it's the PR. When smoke
         never passed in this run the failure could be corrupt models or a
@@ -776,13 +799,11 @@ class Lab:
         try:
             okb, bout = self.build()
         except Exception as e:
-            self.revert_last()
-            self.quarantine(n, f"build-{gate_error_reason(e)}", str(e)[-2000:])
-            return False
+            return self._handle_build_fail(n, f"build-{gate_error_reason(e)}: {e}",
+                                           f"build-{gate_error_reason(e)}")
         if not okb:
-            self.revert_last()
-            self.quarantine(n, "build-failed", bout[-2000:])
-            return False
+            return self._handle_build_fail(n, bout)
+        self._build_ok = True
         try:
             oks, sout = self.smoke()
         except Exception as e:
@@ -911,6 +932,7 @@ class Lab:
         print(f"baseline build: {'OK' if ok else 'FAIL'}", flush=True)
         if not ok:
             return
+        self._build_ok = True  # clean base built: toolchain proven for this run
         runs, last_bout = [], ""
         attempts = 2 if getattr(self.a, "bench_noise_pct", 5.0) else 1
         for _ in range(attempts):
@@ -1021,12 +1043,27 @@ class Lab:
             if not okb:
                 culprit = remaining.pop()
                 self.revert_last()
+                if not getattr(self, "_build_ok", False):
+                    # Same first-failure ambiguity as smoke: with no green
+                    # build yet this run, the failure could be infra.
+                    self.log(event="build-first-failure", pr=culprit, gate="final")
+                    try:
+                        okv, boutv = self.build()
+                    except Exception as e:
+                        okv, boutv = False, f"build-{gate_error_reason(e)}: {e}"
+                    if not okv:
+                        raise RuntimeError(
+                            f"build infra broken (clean tree fails build: "
+                            f"{str(boutv)[-500:]}); fix toolchain/disk and "
+                            f"re-run — PR #{culprit} NOT quarantined")
+                    self._build_ok = True
                 self._drop_merged(culprit)
                 self._mark_late(culprit, "late-build-failed")
                 self.quarantine(culprit, "late-build-failed", str(bout)[-2000:])
                 self.log(event="late-heal", pr=culprit, gate="build")
                 steps += 1
                 continue
+            self._build_ok = True
             try:
                 oks, sout = self.smoke()
             except Exception as e:
@@ -1037,8 +1074,6 @@ class Lab:
                 if not getattr(self, "_smoke_green", False):
                     # Same first-failure ambiguity as per-PR gates: with no
                     # green smoke yet this run, the failure could be infra.
-                    # Abort loudly (culprit stays listed-but-reverted for
-                    # doctor) instead of burning a good PR as late-smoke.
                     self.log(event="smoke-first-failure", pr=culprit, gate="final")
                     if not self._smoke_infra_ok():
                         raise RuntimeError(
@@ -1052,6 +1087,7 @@ class Lab:
                 self.log(event="late-heal", pr=culprit, gate="smoke")
                 steps += 1
                 continue
+            self._smoke_green = True
             if self.a.bench_model and (self.a.regression_pct or 0) > 0 and \
                os.path.exists(os.path.expanduser(self.a.bench_model)) and \
                self.state.get("bench_baseline"):
