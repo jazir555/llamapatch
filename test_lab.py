@@ -1590,5 +1590,33 @@ with tempfile.TemporaryDirectory() as td:
             else:
                 os.environ[k] = v
 
+# 53. main() CLI wiring (argv -> dry/report without touching the repo)
+import contextlib as _cl
+_argv53 = sys.argv
+try:
+    with tempfile.TemporaryDirectory() as td53:
+        cf53 = os.path.join(td53, "c.json")
+        json.dump([{"number": 1, "title": "t"}, {"number": 2, "title": "u"}],
+                  open(cf53, "w"))
+        sd53 = os.path.join(td53, "st"); os.makedirs(sd53)
+        sys.argv = ["merge_lab.py", "--candidates", cf53, "--state-dir", sd53,
+                    "--batch", "1", "--max-prs", "1", "--dry-run"]
+        _buf53 = _io.StringIO()
+        with _cl.redirect_stdout(_buf53):
+            M.main()
+        check("cli-dry-run", "batch: [1]" in _buf53.getvalue(), _buf53.getvalue()[:200])
+        rep53 = os.path.join(td53, "r.md")
+        sys.argv = ["merge_lab.py", "--candidates", cf53, "--state-dir", sd53,
+                    "--report", "--report-out", rep53]
+        with _cl.redirect_stdout(_io.StringIO()):
+            M.main()
+        _r53 = open(rep53).read()
+        check("cli-report", "llamapatch report" in _r53 and "pending: 2" in _r53,
+              _r53[:200])
+        check("cli-no-lock", not os.path.exists(os.path.join(sd53, "lab.lock")),
+              str(os.listdir(sd53)))
+finally:
+    sys.argv = _argv53
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
