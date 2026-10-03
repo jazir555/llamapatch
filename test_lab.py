@@ -2308,6 +2308,53 @@ with tempfile.TemporaryDirectory() as td70:
           and any("f.txt" in s for s in _r70.get("dirty_sample", [])),
           body[:300])
 
+# 71. GUI drives the real merge loop: mock repo, unbuildable project ->
+# build-failed quarantine propagates through HTTP into state + report.
+with tempfile.TemporaryDirectory() as td71:
+    repo = os.path.join(td71, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "pr/701")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\nfixed\n")
+    _git(repo, "commit", "-am", "pr701")
+    _git(repo, "checkout", "master")
+    cf71 = os.path.join(td71, "c.json")
+    json.dump([{"number": 701, "title": "fix thing"}], open(cf71, "w"))
+    sd71 = os.path.join(td71, "st")
+    _sm71 = os.path.join(td71, "tiny.gguf"); open(_sm71, "w").write("x")
+    st, body = _post60("/api/merge", {"candidates": cf71, "repo": repo,
+                                      "base": "master", "state_dir": sd71,
+                                      "numbers": [701], "batch": 10,
+                                      "max_prs": 10, "smoke_model": _sm71})
+    _mid71 = json.loads(body).get("id") if st == 200 else None
+    check("gui-real-accepted", st == 200 and isinstance(_mid71, int),
+          f"{st} {body[:150]}")
+    _term71, _tail71 = "", ""
+    for _ in range(120):
+        _t60.sleep(0.5)
+        st, body = _get60(f"/api/runs/{_mid71}")
+        _rr71 = json.loads(body)
+        if _rr71.get("status") != "running":
+            _term71 = _rr71.get("status")
+            _tail71 = _rr71.get("log_tail", "")
+            break
+    check("gui-real-terminal", _term71 in ("done", "failed"), _term71)
+    _st71 = json.load(open(os.path.join(sd71, "lab-state.json")))
+    # Outcome depends on toolchain: with cmake the unbuildable mock
+    # quarantines build-failed; without cmake the first-failure guard
+    # aborts loudly instead. Both prove the real loop ran end to end.
+    if "NOT quarantined" in _tail71:
+        check("gui-real-infra-abort", _st71.get("quarantined") == [],
+              str(_st71.get("quarantined")))
+    else:
+        check("gui-real-quarantined", _st71.get("quarantined") == [701],
+              str(_st71.get("quarantined")))
+    check("gui-real-report", "701" in _tail71 or "build-failed" in _tail71
+          or "NOT quarantined" in _tail71, _tail71[-300:])
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")

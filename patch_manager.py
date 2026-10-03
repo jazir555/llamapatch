@@ -102,6 +102,8 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <label>Max PRs <input id="maxprs" type="text" value="50" style="width:4em"></label>
 <button onclick="merge(false)">Merge selected</button><button onclick="merge(true)">Dry run</button>
 <button onclick="cancel()">Cancel run</button><button onclick="doctor()">Doctor</button><button onclick="report()">Report</button></div>
+<div class="row"><label>Smoke model <input id="smokemodel" type="text" placeholder="(default path)"></label>
+<label>Bench model <input id="benchmodel" type="text" placeholder="(default path)"></label></div>
 <div class="row"><label>Filter <input id="flt" type="text" placeholder="text…" oninput="render()"></label>
 <label>Status <select id="fltstatus" onchange="render()"><option value="">all</option><option>pending</option><option>merged</option><option>quarantined</option></select></label></div>
 <table><thead><tr><th></th><th><a href="#" onclick="return sort('number')">PR</a></th><th><a href="#" onclick="return sort('title')">title</a></th><th><a href="#" onclick="return sort('score')">score</a></th><th>area</th><th>files</th><th>CI</th><th>verdict</th><th><a href="#" onclick="return sort('status')">status</a></th></tr></thead>
@@ -123,8 +125,8 @@ async function versions(){const q=new URLSearchParams({repo:val('repo')});const 
 function selKey(){return 'llamapatch-sel:'+val('cands')}
 function savedChecks(){try{const s=JSON.parse(localStorage.getItem(selKey())||'null');return Array.isArray(s)?new Set(s):null}catch(e){return null}}
 function saveChecks(){try{localStorage.setItem(selKey(),JSON.stringify(selected()))}catch(e){}}
-function saveFields(){try{localStorage.setItem('llamapatch-fields',JSON.stringify({slug:val('slug'),repo:val('repo'),base:val('base'),cands:val('cands'),statedir:val('statedir'),batch:val('batch'),maxprs:val('maxprs')}))}catch(e){}}
-function restoreFields(){try{const f=JSON.parse(localStorage.getItem('llamapatch-fields')||'null');if(!f)return;for(const k of ['slug','repo','base','cands','statedir','batch','maxprs']){if(f[k]!==undefined)document.getElementById(k).value=f[k]}}catch(e){}}
+function saveFields(){try{localStorage.setItem('llamapatch-fields',JSON.stringify({slug:val('slug'),repo:val('repo'),base:val('base'),cands:val('cands'),statedir:val('statedir'),batch:val('batch'),maxprs:val('maxprs'),smokemodel:val('smokemodel'),benchmodel:val('benchmodel')}))}catch(e){}}
+function restoreFields(){try{const f=JSON.parse(localStorage.getItem('llamapatch-fields')||'null');if(!f)return;for(const k of ['slug','repo','base','cands','statedir','batch','maxprs','smokemodel','benchmodel']){if(f[k]!==undefined)document.getElementById(k).value=f[k]}}catch(e){}}
 restoreFields();
 function val(id){return document.getElementById(id).value.trim()}
 function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
@@ -132,7 +134,7 @@ function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
 async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 async function setup(){const b={url:val('cloneurl'),dest:val('clonedest'),base:val('base')||'master'};const r=await api('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
-async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
+async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,smoke_model:val('smokemodel'),bench_model:val('benchmodel'),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
 function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;clearInterval(TIMER);TIMER=setInterval(poll,1000);poll()}
@@ -634,6 +636,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                "--max-prs", str(max_prs)]
         if body.get("dry_run"):
             cmd.append("--dry-run")
+        for _flag, _key in (("--smoke-model", "smoke_model"),
+                            ("--bench-model", "bench_model")):
+            _v = (body.get(_key) or "").strip()
+            if _v:
+                cmd.extend([_flag, _v])
         rid = self._spawn("merge", cmd, None, state_dir=sd)
         return _json(self, 200, {"id": rid, "selected": os.path.basename(sel_path)})
 
