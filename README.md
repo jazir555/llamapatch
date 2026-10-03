@@ -206,6 +206,12 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
     permanently, for an operator setup error. (Bench degrades to
     unverified when its model is absent; smoke has no skip path, so
     refusal is the only safe answer. Doctor/report skip the check.)
+  - *First-failure infra proof:* the first build/smoke failure in a run
+    rebuilds the clean tree and re-runs the gate — a dead toolchain, full
+    disk, or corrupt model aborts loudly with the PR explicitly NOT
+    quarantined instead of burning good PRs (per-PR gates and final gate
+    alike; the lock still releases, so resume works after the fix). Once
+    a gate passes, later failures are the PR's.
 
 ## Results (2026-10-02, WSL Ubuntu, 4 vCPU, CPU backend, threads=2)
 
