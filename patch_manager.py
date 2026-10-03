@@ -83,6 +83,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 </style></head><body>
 <h1>llamapatch manager</h1>
 <div class="row" id="err" style="color:#a00"></div>
+<div class="row"><small>Flow: Setup checkout → Triage (fills Candidates file) → Load → tick PRs → Merge selected. Versions lists the checkout's branches/tags.</small></div>
 <div class="row"><label>Upstream slug <input id="slug" type="text" value="ggml-org/llama.cpp"></label></div>
 <div class="row"><label>Checkout (repo) <input id="repo" type="text" placeholder="/home/user/llama-pr-lab/llama.cpp"></label>
 <label>Base <input id="base" type="text" value="master" style="width:8em" list="refs"></label>

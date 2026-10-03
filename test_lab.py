@@ -2335,6 +2335,20 @@ with tempfile.TemporaryDirectory() as td74:
                    + "&state_dir=" + _up60.quote(sd74))
     check("gui-result-missing", st == 400, str(st))
 
+# 75. the real sample file loads end to end (guards sample validity too)
+_sample75 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "candidates-sample.json")
+if os.path.exists(_sample75):
+    st, body = _get60("/api/candidates?file=" + _up60.quote(_sample75))
+    _s75 = json.loads(body).get("candidates", [])
+    check("gui-sample-loads", st == 200 and len(_s75) == 30
+          and all(c["status"] == "pending" for c in _s75),
+          f"{st} {len(_s75)}")
+    check("gui-sample-shape",
+          all(isinstance(c["number"], int) and c["title"] for c in _s75))
+else:
+    check("gui-sample-loads", False, "sample file missing")
+
 # 71. GUI drives the real merge loop: mock repo, unbuildable project ->
 # build-failed quarantine propagates through HTTP into state + report.
 with tempfile.TemporaryDirectory() as td71:
