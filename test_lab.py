@@ -2364,6 +2364,12 @@ _c72.request("POST", "/api/merge", _big72,
 _r72 = _c72.getresponse()
 check("gui-body-cap", _r72.status == 413, str(_r72.status))
 
+# 73. report failures surface as readable errors (page shows them)
+with tempfile.TemporaryDirectory() as td73:
+    st, body = _get60("/api/report?candidates=" + _up60.quote(
+        os.path.join(td73, "nope.json")))
+    check("gui-report-error", st == 404 and "not found" in body, f"{st} {body[:150]}")
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")

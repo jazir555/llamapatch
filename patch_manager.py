@@ -138,8 +138,8 @@ function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
 async function triage(){const out=val('out')||'candidates.json';const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:out,include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});PENDINGOUT=out;watch(r.id)}
 async function setup(){const b={url:val('cloneurl'),dest:val('clonedest'),base:val('base')||'master'};const r=await api('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
-async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,smoke_model:val('smokemodel'),bench_model:val('benchmodel'),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
-async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
+async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,smoke_model:val('smokemodel'),bench_model:val('benchmodel'),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
+async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);const t=await r.text();if(!r.ok)throw new Error(t.slice(0,300));document.getElementById('rep').textContent=t}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
 function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;busy(true);clearInterval(TIMER);TIMER=setInterval(()=>poll().catch(e=>err('Error: '+e.message)),1000);poll().catch(e=>err('Error: '+e.message))}
 async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);busy(false);if(PENDINGOUT){document.getElementById('cands').value=PENDINGOUT;PENDINGOUT=null;await load()}else{await load()}await report()}}
@@ -754,6 +754,7 @@ def serve(host="127.0.0.1", port=8123):
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(f"refusing non-loopback host {host!r}")
     socketserver.ThreadingTCPServer.allow_reuse_address = True
+    socketserver.ThreadingTCPServer.daemon_threads = True
     with socketserver.ThreadingTCPServer((host, port), Handler) as srv:
         print(f"llamapatch manager at http://{host}:{srv.server_address[1]}",
               flush=True)
