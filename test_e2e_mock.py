@@ -285,5 +285,48 @@ with tempfile.TemporaryDirectory() as td:
     check("ci-flip-clean", lab2.state["quarantined"] == [],
           str(lab2.state["quarantined"]))
 
+# Scenario 5: noise guard end to end. Baseline anchors on the mean of two
+# runs; a boundary per-PR reading earns one confirmation run through the
+# real run() loop instead of a noisy revert. Scripted bench values are
+# consumed in order: 2 baseline + 2 gate (boundary, clean) + final-verify.
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo")
+    statedir = os.path.join(td, "state")
+    os.makedirs(repo); os.makedirs(statedir)
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.email", "t@t")
+    git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+    git(repo, "checkout", "-b", "pr/401")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\nfixed\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "pr401")
+    git(repo, "checkout", "master")
+
+    model = os.path.join(td, "m.gguf")
+    open(model, "w").write("x")
+    lab = make_lab(repo, statedir, [{"number": 401, "title": "fix overlap check"}])
+    lab.a.batch = 10; lab.a.max_prs = 10
+    lab.a.bench_model = model
+    lab.a.regression_pct = 15
+    lab.build = lambda: (True, "mock build ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s mock")
+    vals = [40.0, 40.0, 33.5, 40.0]
+    def _seq():
+        v = vals.pop(0) if len(vals) > 1 else vals[0]
+        return (True, v, f"v={v}")
+    lab.bench = _seq
+    lab.run()
+    check("confirm-e2e-merged", lab.state["merged"] == [401],
+          str(lab.state["merged"]))
+    check("confirm-e2e-base-mean",
+          lab.state["bench_baseline"] == 40.0
+          and lab.state.get("bench_baseline_runs") == [40.0, 40.0],
+          str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
+    br = lab.state.get("bench_results", {}).get("401", {})
+    check("confirm-e2e-runs", br.get("runs") == [33.5, 40.0]
+          and br.get("verdict") == "parity", str(br))
+    check("confirm-e2e-logged", '"bench-confirmed"' in open(lab.log_f).read())
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
