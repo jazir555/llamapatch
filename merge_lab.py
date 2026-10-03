@@ -644,6 +644,19 @@ class Lab:
         rc, old_head = self.git("rev-parse HEAD")
         old_head = old_head.strip() if rc == 0 else ""
         rc, merge_out = self.git(f"merge --no-ff --no-edit pr/{n}")
+        if rc != 0 and "shallow" in merge_out.lower():
+            # Shallow boundary, not a real conflict: our history lacks the
+            # merge-base (expected with partial/shallow provisioning from
+            # setup_lab.sh). Deepen once and retry; a genuine conflict
+            # still fails below and quarantines as merge-conflict.
+            self.clean_tree()
+            self.log(event="shallow-deepen", pr=n)
+            drc, dout = self.git("fetch --deepen=100 origin")
+            if drc == 0:
+                rc, merge_out = self.git(f"merge --no-ff --no-edit pr/{n}")
+            else:
+                self.log(event="shallow-deepen-failed", pr=n,
+                         detail=dout[-300:])
         if rc != 0:
             self.clean_tree()
             return False, f"merge-conflict: {merge_out[-1500:]}"

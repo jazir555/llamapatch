@@ -876,7 +876,7 @@ with tempfile.TemporaryDirectory() as td:
 import shutil as _shutil
 import subprocess as _sp3
 _bash = _shutil.which("bash")
-_scripts = ["triage-1k.sh", "llamapatch", "fetch_models.sh"]
+_scripts = ["triage-1k.sh", "llamapatch", "fetch_models.sh", "setup_lab.sh"]
 if _bash:
     import re as _re2
     for _s in _scripts:
@@ -1655,6 +1655,76 @@ with tempfile.TemporaryDirectory() as td55b:
     sd55b = os.path.join(td55b, "st"); os.makedirs(sd55b)
     a55b = _mklab(os.path.join(td55b, "norepo"), sd55b, [{"number": 1}])
     check("doctor-warnings-default", M.Lab(a55b).doctor_warnings == [])
+
+# 58. PR content without full repos: shallow-boundary deepen+retry,
+# setup_lab.sh provisioning shape
+_setup58 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "setup_lab.sh")).read()
+check("setup-partial", "--filter=blob:none" in _setup58)
+check("setup-shallow", "--depth" in _setup58)
+check("setup-sparse", "sparse-checkout" in _setup58)
+check("setup-base", 'LAB_BASE' in _setup58 and 'checkout "$BASE"' in _setup58)
+check("setup-idempotent", ".git" in _setup58 and "exists (skip clone)" in _setup58)
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 61, "title": "shallow-pr"}])
+    lab = M.Lab(a)
+    _calls58, _merges58 = [], {"n": 0}
+    def _fakegit58(cmd, check=False, timeout=300):
+        _calls58.append(cmd)
+        if cmd.startswith("fetch --deepen"):
+            return 0, "deepened"
+        if cmd.startswith("fetch origin"):
+            return 0, ""
+        if cmd.startswith("merge --no-ff"):
+            _merges58["n"] += 1
+            if _merges58["n"] == 1:
+                return 1, "fatal: refusing to merge unrelated histories (shallow boundary)"
+            return 0, "Merge made by test"
+        if cmd == "rev-parse HEAD":
+            return 0, "aaa\n" if _merges58["n"] <= 1 else "bbb\n"
+        if cmd.startswith("rev-list"):
+            return 0, "bbb p1 p2\n"
+        if cmd.startswith("diff HEAD"):
+            return 0, " f.txt | 2 +-"
+        return 0, ""
+    lab.git = _fakegit58
+    lab.git_args = lambda args: (0, "")
+    ok, reason = lab._merge_one_inner(61, "batch-0")
+    check("shallow-deepens-retries", ok and reason is None, f"{ok} {reason}")
+    check("shallow-deepen-called",
+          any(c.startswith("fetch --deepen") for c in _calls58), str(_calls58))
+    check("shallow-deepen-logged", '"shallow-deepen"' in open(lab.log_f).read())
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 62, "title": "conflict-pr"}])
+    lab = M.Lab(a)
+    _calls58b = []
+    def _fakegit58b(cmd, check=False, timeout=300):
+        _calls58b.append(cmd)
+        if cmd.startswith("fetch origin"):
+            return 0, ""
+        if cmd.startswith("merge --no-ff"):
+            return 1, "Auto-merging f.txt\nCONFLICT (content): Merge conflict"
+        return 0, ""
+    lab.git = _fakegit58b
+    ok, reason = lab._merge_one_inner(62, "batch-0")
+    check("conflict-no-deepen", not ok and str(reason).startswith("merge-conflict"),
+          f"{ok} {str(reason)[:80]}")
+    check("conflict-skips-deepen",
+          not any(c.startswith("fetch --deepen") for c in _calls58b))
 
 # 56. first-ever smoke failure verifies infra before blaming the PR
 _fix56 = {"area": "fix", "backends": [], "expects_bench_gain": False}

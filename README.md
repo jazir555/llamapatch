@@ -17,6 +17,12 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
 2. **Merge via `pull/N/head` refspec, not fork remotes.** `git fetch origin
    pull/N/head:pr/N` needs no token, no per-fork remote (unlike
    `scripts/pr2wt.sh`, which is for interactive single-PR worktrees).
+   The worktree itself is provisioned WITHOUT a full clone
+   (`setup_lab.sh`: `--depth 100` shallow history + `--filter=blob:none`
+   partial clone + optional sparse checkout) — merging needs the base
+   tree, PR diffs, and merge-base history, not every historical blob.
+   If a merge hits a shallow boundary, the loop deepens once
+   (`fetch --deepen`) and retries; genuine conflicts still quarantine.
 3. **Batches of 10.** Limits blast radius while making steady progress;
    each PR gets its own verified commit, so a bad PR reverts cleanly
    (`git reset --hard HEAD~1`) without losing the other 9.
@@ -66,8 +72,9 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
 sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc g++ curl jq pkg-config libcurl4-openssl-dev ccache
 pip3 install huggingface_hub
 
-# 1. clone + models
-git clone https://github.com/ggml-org/llama.cpp.git ~/llama-pr-lab/llama.cpp
+# 1. clone + models (WITHOUT a full clone: shallow history + blobless
+#    partial clone fetches file contents on demand; PR refs arrive per-PR)
+bash pr-lab/setup_lab.sh   # or: bash llamapatch setup
 bash pr-lab/fetch_models.sh   # tiny (~0.7GB) + 7B Q4_K_M (~4.7GB)
 
 # 2. triage (set GH_TOKEN to avoid 60/hr limit)
@@ -89,7 +96,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 328 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra
+python3 test_lab.py   # 339 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads/stale/headprune/parents/confirm/finalconfirm/basemean/warnings/headskip/knobs/lifecycle/triage/runs/atomic/baseref/intentedge/stage2/cli/modelgate/breaker/smokeinfra/buildinfra/shallow
 python3 test_e2e_mock.py  # 43 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry + head-shas + confirm-e2e + abort-e2e
 ```
 
