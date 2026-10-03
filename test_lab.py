@@ -1363,6 +1363,32 @@ with tempfile.TemporaryDirectory() as td:
     lab.doctor()  # must not crash on minimal args
     check("doctor-minimal-args", lab.state["merged"] == [])
 
+# 51. intent priority edges (wrong expects_gain rolls back good PRs)
+from pr_intent import classify_intent as _ci, detect_backends as _db
+_fixperf = _ci({"number": 1, "title": "fix CUDA crash, faster path",
+                "labels": [], "files": ["ggml/src/ggml-cuda/x.cu"]})
+check("intent-fix-beats-perf", _fixperf["area"] == "fix"
+      and not _fixperf["expects_bench_gain"], str(_fixperf))
+_metal = _ci({"number": 2, "title": "faster metal kernels",
+              "labels": [], "files": ["ggml/src/ggml-metal/x.metal"]})
+check("intent-metal-backend-only", "metal" in _metal["backends"]
+      and not _metal["expects_bench_gain"], str(_metal))
+_vk = _ci({"number": 3, "title": "vulkan: pack FMA",
+           "labels": ["vulkan"], "files": []})
+check("intent-vulkan-label", "vulkan" in _vk["backends"]
+      and _vk["area"] != "fix", str(_vk))
+_feat = _ci({"number": 4, "title": "add Qwen3 support", "labels": [], "files": []})
+check("intent-feature", _feat["area"] == "feature"
+      and not _feat["expects_bench_gain"], str(_feat))
+_empty = _ci({})
+check("intent-empty-safe", _empty["area"] == "other"
+      and not _empty["expects_bench_gain"] and _empty["backends"] == [],
+      str(_empty))
+_srv = _ci({"number": 5, "title": "faster parallel decoding",
+            "labels": [], "files": ["tools/server/server.cpp"]})
+check("intent-server-cpu-visible", _srv["expects_bench_gain"], str(_srv))
+check("intent-backends-pure", _db({"labels": ["CUDA"], "title": "", "files": []}) == ["cuda"])
+
 # 44. fallback without triaged head_full merges (unenriched candidates skip
 # the freshness check instead of blocking on it)
 with tempfile.TemporaryDirectory() as td:
