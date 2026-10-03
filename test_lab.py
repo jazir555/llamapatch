@@ -839,6 +839,8 @@ with tempfile.TemporaryDirectory() as td:
 def _implab(sd, model, results):
     lab = _benchlab(sd, model, 40.0)
     lab.state["bench_results"] = dict(results)
+    lab.state["merged"] = [int(k) for k, v in results.items()
+                           if isinstance(v, dict) and v.get("verdict") == "improvement"]
     return lab
 
 with tempfile.TemporaryDirectory() as td:
@@ -882,6 +884,55 @@ with tempfile.TemporaryDirectory() as td:
     lab.bench = lambda: (_ for _ in ()).throw(_sp4.TimeoutExpired("bench", 600))
     st, _ = lab.verify_improvements_final([77])
     check("improvements-flake", st == "unverified", st)
+
+# 32. no ghost gains: heal-reverted PRs must not pass the final gain check
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "A")
+    open(os.path.join(repo, "f.txt"), "w").write("v3\n")
+    _git(repo, "commit", "-am", "B")
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 ok")
+    def _hb():
+        content = open(os.path.join(repo, "f.txt")).read()
+        return (True, 30.0, "slow") if "v3" in content else (True, 48.0, "ok")
+    lab.bench = _hb
+    lab.state["merged"] = [71, 72]
+    lab.state["bench_results"] = {"71": {"tg": 47.0, "verdict": "improvement"},
+                                  "72": {"tg": 48.0, "verdict": "improvement"}}
+    st, _ = lab.final_verify_and_heal([71, 72])
+    check("ghost-healed", st == "healed", st)
+    check("ghost-marked",
+          lab.state["bench_results"]["72"]["verdict"] == "late-regression",
+          str(lab.state["bench_results"]))
+    st2, detail2 = lab.verify_improvements_final([71, 72])
+    check("ghost-excluded", st2 == "verified" and "72" not in detail2,
+          f"{st2} {detail2}")
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.build = lambda: (False, "boom")
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 40.0, "x")
+    lab.state["merged"] = [71]
+    lab.state["bench_results"] = {"71": {"tg": 48.0, "verdict": "improvement"}}
+    st, _ = lab.final_verify_and_heal([71])
+    check("ghost-build-marked",
+          st == "healed"
+          and lab.state["bench_results"]["71"]["verdict"] == "late-build-failed",
+          f"{st} {lab.state['bench_results']}")
 
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

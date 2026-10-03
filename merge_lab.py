@@ -765,6 +765,17 @@ class Lab:
         if n in self.state["merged"]:
             self.state["merged"] = [m for m in self.state["merged"] if m != n]
 
+    def _mark_late(self, n, verdict):
+        """Stamp a heal-reverted culprit's bench verdict so reports and the
+        post-heal gain check never credit a PR whose commit is gone."""
+        br = self.state.setdefault("bench_results", {})
+        entry = br.get(str(n))
+        if isinstance(entry, dict):
+            entry["verdict"] = verdict
+        else:
+            br[str(n)] = {"verdict": verdict}
+        self.save()
+
     def final_verify_and_heal(self, new_merges):
         """Post-run gate: per-PR gates pass at merge time, but regressions
         can surface AFTER merges (interactions between PRs in the batch).
@@ -789,6 +800,7 @@ class Lab:
                 culprit = remaining.pop()
                 self.revert_last()
                 self._drop_merged(culprit)
+                self._mark_late(culprit, "late-build-failed")
                 self.quarantine(culprit, "late-build-failed", str(bout)[-2000:])
                 self.log(event="late-heal", pr=culprit, gate="build")
                 steps += 1
@@ -801,6 +813,7 @@ class Lab:
                 culprit = remaining.pop()
                 self.revert_last()
                 self._drop_merged(culprit)
+                self._mark_late(culprit, "late-smoke-failed")
                 self.quarantine(culprit, "late-smoke-failed", str(sout)[-2000:])
                 self.log(event="late-heal", pr=culprit, gate="smoke")
                 steps += 1
@@ -821,13 +834,10 @@ class Lab:
                     culprit = remaining.pop()
                     self.revert_last()
                     self._drop_merged(culprit)
+                    self._mark_late(culprit, "late-regression")
                     self.quarantine(culprit, "late-regression", f"{val} vs {base}")
                     self.log(event="late-heal", pr=culprit, gate="bench",
                              val=val, base=base)
-                    br = self.state.setdefault("bench_results", {})
-                    if isinstance(br.get(str(culprit)), dict):
-                        br[str(culprit)]["verdict"] = "late-regression"
-                    self.save()
                     steps += 1
                     continue
             break
@@ -849,8 +859,13 @@ class Lab:
         the logged claim list + final numbers.
         """
         br = self.state.get("bench_results", {}) or {}
+        # Only PRs still merged count: heal-reverted culprits were stamped
+        # late-* by _mark_late, but filter by merged membership too so a
+        # ghost claim can never pass verification.
+        alive = set(self.state.get("merged", []) or [])
         claimed = [n for n in new_merges
-                   if isinstance(br.get(str(n)), dict)
+                   if n in alive
+                   and isinstance(br.get(str(n)), dict)
                    and br.get(str(n)).get("verdict") == "improvement"]
         if not claimed:
             return "na", "no improvement claims this run"
