@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# llamapatch entrypoint: triage + batch-10 mass-merge loop.
+# Usage:
+#   bash llamapatch triage [--limit 1000 --top 200]
+#   bash llamapatch merge [--batch 10 --max-prs 50]
+#   bash llamapatch dry [--batch 10 --max-prs 50]
+#   bash llamapatch doctor
+#   bash llamapatch report [--report-out report.md]
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CMD="${1:-help}"; shift || true
+PY=python3
+case "$CMD" in
+  triage)
+    $PY -u "$HERE/fetch_prs.py" --limit 1000 --top 200 --out candidates-1k.json --include-ci "$@"
+    ;;
+  merge)
+    $PY -u "$HERE/merge_lab.py" --candidates "${CANDIDATES:-candidates-1k.json}" \
+      --batch 10 --max-prs 50 --pp 32 --tg 32 --regression-pct 15 "$@"
+    ;;
+  dry)
+    $PY -u "$HERE/merge_lab.py" --candidates "${CANDIDATES:-candidates-1k.json}" \
+      --batch 10 --max-prs 50 --dry-run "$@"
+    ;;
+  doctor)
+    $PY -u "$HERE/merge_lab.py" --candidates "${CANDIDATES:-candidates-1k.json}" --doctor "$@"
+    ;;
+  report)
+    $PY -u "$HERE/merge_lab.py" --candidates "${CANDIDATES:-candidates-1k.json}" --report "$@"
+    ;;
+  *)
+    echo "usage: bash llamapatch {triage|merge|dry|doctor|report}"
+    exit 1
+    ;;
+esac

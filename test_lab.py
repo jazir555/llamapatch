@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""Self-tests for llamapatch pure logic. No network, no WSL, no models.
+
+Run: python3 test_lab.py
+Covers the gates that previously broke auto-merge: bench parsing,
+smoke verdict, batch planning, CI skip, doctor matching, merge-message
+sanitization, perf-path matching, and corrupt-state self-heal.
+"""
+import json, os, sys, tempfile
+
+sys.path.insert(0, os.path.dirname(__file__))
+import merge_lab as M
+from fetch_prs import touches_perf, score_title
+
+FAIL = []
+
+def check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name + (f" :: {detail}" if detail and not cond else ""))
+    if not cond:
+        FAIL.append(name)
+
+# 1. bench parsing
+check("bench-list", M.parse_bench_output('[{"n_gen":0,"avg_ts":99},{"n_gen":32,"avg_ts":38.05}]') == 38.05)
+check("bench-results-obj", M.parse_bench_output('{"results": [{"n_gen":16,"avg_ts":15.79}]}') == 15.79)
+check("bench-log-prefix", M.parse_bench_output('build ok\n[{"n_gen":128,"avg_ts":42.5}]') == 42.5)
+check("bench-trailing-line", M.parse_bench_output('[{"n_gen":32,"avg_ts":40.0}]\nsummary done') == 40.0)
+check("bench-regex-fallback", M.parse_bench_output('speed: 160.39 tok/s') == 160.39)
+check("bench-none", M.parse_bench_output('no numbers here') is None)
+
+# 2. smoke verdict
+check("smoke-tg", M.smoke_ok(0, "tg32 : 42 t/s"))
+check("smoke-throughput", M.smoke_ok(0, "throughput 160 t/s"))
+check("smoke-avgts", M.smoke_ok(0, '{"avg_ts": 38.05}'))
+check("smoke-rc-fail", not M.smoke_ok(1, "tg32 : 42 t/s"))
+check("smoke-empty", not M.smoke_ok(0, "silent output"))
+
+# 3. batch planning (10 at a time)
+pending = list(range(1, 26))
+batches = M.plan_batches(pending, 10, 50)
+check("batches-10", batches == [list(range(1, 11)), list(range(11, 21)), list(range(21, 26))])
+check("batches-cap", M.plan_batches(pending, 10, 15) == [list(range(1, 11)), list(range(11, 16))])
+check("batches-empty", M.plan_batches([], 10, 50) == [])
+
+# 4. CI skip
+check("ci-skip-failure", M.should_skip_ci({"ci_state": "failure"}, True))
+check("ci-skip-error", M.should_skip_ci({"ci_state": "error"}, True))
+check("ci-keep-success", not M.should_skip_ci({"ci_state": "success"}, True))
+check("ci-keep-pending", not M.should_skip_ci({"ci_state": "pending"}, True))
+check("ci-keep-unset", not M.should_skip_ci({}, True))
+check("ci-override", not M.should_skip_ci({"ci_state": "failure"}, False))
+
+# 5. doctor matching (v4 #N + legacy pr/N)
+check("doctor-hash", M.doctor_match("pr-lab: merge #29110 metal kernels", 29110))
+check("doctor-legacy", M.doctor_match("Merge branch 'pr/29110' into x", 29110))
+check("doctor-miss", not M.doctor_match("pr-lab: merge #9999 other", 29110))
+
+# 6. merge message sanitization (shell-injection safe)
+msg = M.sanitize_merge_msg(1, "fix $(rm -rf /) `evil` 'q' \"d\"; | & stuff\nnewline")
+check("msg-no-shell", all(c not in msg for c in ["$", "`", "'", '"', ";", "|", "&", "\n"]),
+      msg)
+check("msg-has-num", "#1" in msg)
+check("msg-trunc", len(M.sanitize_merge_msg(2, "x" * 500)) <= len("pr-lab: merge #2 ") + 100)
+
+# 7. perf-path prefix matching (no substring false positives)
+cfg = {"perf_paths": ["ggml/src", "ggml/include", "src/", "common/", "tools/server", "examples/bench"],
+       "perf_keywords": []}
+check("perf-cuda", touches_perf(["ggml/src/ggml-cuda/foo.cu"], cfg))
+check("perf-src", touches_perf(["src/llama.cpp"], cfg))
+check("perf-docs-miss", not touches_perf(["docs/README.md"], cfg))
+check("perf-substr-miss", not touches_perf(["my_src_fake/file.cpp"], cfg))
+
+# 8. scoring
+s, hits = score_title("CUDA perf: faster flash attention kernel", "", {"perf_keywords": ["perf", "cuda", "flash", "kernel"]})
+check("score-hits", s == 4 and "cuda" in hits, f"{s} {hits}")
+
+# 9. corrupt-state self-heal
+class A: pass
+with tempfile.TemporaryDirectory() as td:
+    cand = os.path.join(td, "c.json")
+    json.dump([{"number": 1, "title": "t"}], open(cand, "w"))
+    open(os.path.join(td, "lab-state.json"), "w").write("{corrupt!")
+    open(os.path.join(td, "quarantined.json"), "w").write("[corrupt!")
+    a = A(); a.repo = td; a.state_dir = td; a.candidates = cand
+    try:
+        lab = M.Lab(a)
+        check("corrupt-state-fresh", lab.state["merged"] == [] and lab.quar == [])
+        bak = [f for f in os.listdir(td) if "corrupt-" in f]
+        check("corrupt-backup", len(bak) == 2, str(bak))
+    except Exception as e:
+        check("corrupt-no-crash", False, str(e))
+
+# 10. candidates-sample sanity (batch-10 planning over real triage)
+try:
+    sample = json.load(open(os.path.join(os.path.dirname(__file__), "candidates-sample.json")))
+    nums = [c["number"] for c in sample]
+    check("sample-count", len(nums) >= 20, str(len(nums)))
+    check("sample-batches", M.plan_batches(nums, 10, 30)[0][:3] == nums[:3])
+except Exception as e:
+    check("sample-load", False, str(e))
+
+# 11. intent classification (proves the right thing per PR kind)
+from pr_intent import classify_intent, verdict_for
+cuda_perf = {"number": 1, "title": "CUDA: faster TOP_K kernel", "labels": ["ggml", "cuda"],
+             "files": ["ggml/src/ggml-cuda/top-k.cu"]}
+i = classify_intent(cuda_perf)
+check("intent-cuda-backend", "cuda" in i["backends"], str(i))
+check("intent-cuda-area", i["area"] == "perf", str(i))
+check("intent-cuda-no-cpu-gain", not i["expects_bench_gain"], str(i))
+check("verdict-cuda-parity", verdict_for(i, 40.0, 40.5, 15) == "parity")
+check("verdict-cuda-regression", verdict_for(i, 40.0, 30.0, 15) == "regression")
+check("verdict-cuda-big-gain-parity", verdict_for(i, 40.0, 60.0, 15) == "parity",
+      "backend-only gain on CPU box must not claim improvement")
+cpu_perf = {"number": 2, "title": "ggml-cpu: faster sgemm", "labels": ["ggml"],
+            "files": ["ggml/src/ggml-cpu/llamafile/sgemm.cpp"]}
+j = classify_intent(cpu_perf)
+check("intent-cpu-area", j["area"] == "perf", str(j))
+check("intent-cpu-expects-gain", j["expects_bench_gain"], str(j))
+check("verdict-cpu-improvement", verdict_for(j, 40.0, 60.0, 15) == "improvement")
+fix = {"number": 3, "title": "CUDA: fix crash for MTP decoding", "labels": ["ggml", "cuda"],
+       "files": ["ggml/src/ggml-cuda/ggml-cuda.cu"]}
+k = classify_intent(fix)
+check("intent-fix-area", k["area"] == "fix", str(k))
+check("verdict-fix-parity", verdict_for(k, 40.0, 40.2, 15) == "parity")
+check("verdict-no-baseline", verdict_for(k, None, 40.0, 15) == "no-baseline")
+# real sample: every triaged PR classifies without crash
+try:
+    bad = [c["number"] for c in sample
+           if not isinstance(classify_intent(c).get("area"), str)]
+    check("sample-intent-all", bad == [], str(bad[:5]))
+except Exception as e:
+    check("sample-intent", False, str(e))
+
+# 12. preflight + candidates validation + safe revert
+import subprocess as _sp
+
+def _git(repo, *args):
+    r = _sp.run(["git"] + list(args), cwd=repo, text=True,
+                stdout=_sp.PIPE, stderr=_sp.STDOUT, timeout=60)
+    return r.returncode, (r.stdout or "")
+
+class _A: pass
+
+def _mklab(repo, statedir, cands_obj, write_raw=None):
+    cf = os.path.join(statedir, "c.json")
+    if write_raw is not None:
+        open(cf, "w").write(write_raw)
+    else:
+        json.dump(cands_obj, open(cf, "w"))
+    a = _A(); a.repo = repo; a.state_dir = statedir; a.candidates = cf
+    return a
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 1, "title": "t"}])
+    a.base = "master"
+    lab = M.Lab(a)
+    try:
+        lab.preflight()
+        check("preflight-ok", True)
+    except Exception as e:
+        check("preflight-ok", False, str(e)[:200])
+    check("preflight-logged",
+          "preflight-ok" in open(lab.log_f).read(), "missing preflight-ok event")
+    # revert_last restores HEAD and clean tree
+    _git(repo, "checkout", "-b", "work")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "change")
+    h1 = _git(repo, "rev-parse", "HEAD")[1].strip()
+    try:
+        lab.revert_last()
+        h2 = _git(repo, "rev-parse", "HEAD")[1].strip()
+        check("revert-head", h2 != h1, f"{h1[:8]} vs {h2[:8]}")
+        check("revert-clean", lab.tracked_clean())
+        check("revert-content", open(os.path.join(repo, "f.txt")).read() == "v1\n")
+    except Exception as e:
+        check("revert-last", False, str(e)[:200])
+    _git(repo, "checkout", "master")
+    # tracked dirt detected (build touching a tracked file must not slip by)
+    open(os.path.join(repo, "f.txt"), "w").write("dirty\n")
+    check("dirty-detected", not lab.tracked_clean())
+    _git(repo, "checkout", "--", ".")
+    check("recleaned", lab.tracked_clean())
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    repo = os.path.join(td, "repo"); os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    raw = [{"number": 10, "title": "good"}, {"n": 2}, "oops",
+           {"number": "x"}, {"number": 11, "title": "good2"}]
+    a = _mklab(repo, sd, raw)
+    try:
+        lab = M.Lab(a)
+        check("cands-filtered", [c["number"] for c in lab.cands] == [10, 11],
+              str(lab.cands))
+        check("cands-skipped-count", lab.cands_skipped == 3, str(lab.cands_skipped))
+    except Exception as e:
+        check("cands-validation", False, str(e)[:200])
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    a = _mklab(os.path.join(td, "nope"), sd, [{"number": 1}])
+    a.base = "master"
+    try:
+        M.Lab(a).preflight()
+        check("preflight-missing-repo", False, "should have raised")
+    except RuntimeError as e:
+        check("preflight-missing-repo", "missing" in str(e).lower(), str(e)[:150])
+    a2 = _mklab(sd, sd, [{"number": 1}])  # state dir is not a git repo
+    a2.base = "master"
+    try:
+        M.Lab(a2).preflight()
+        check("preflight-not-a-repo", False, "should have raised")
+    except RuntimeError as e:
+        check("preflight-not-a-repo", "not a git repo" in str(e).lower(), str(e)[:150])
+    a3 = _mklab(sd, sd, [{"number": 1}])
+    a3.base = "master"
+    cf = a3.candidates
+    open(cf, "w").write("{not json!")
+    try:
+        M.Lab(a3)
+        check("cands-corrupt", False, "should have raised")
+    except RuntimeError as e:
+        check("cands-corrupt", "cannot load candidates" in str(e).lower(), str(e)[:150])
+
+# 13. gate timeouts self-heal (hung build/smoke/git quarantines, never crashes)
+import subprocess as _sp2
+check("gate-reason-timeout",
+      M.gate_error_reason(_sp2.TimeoutExpired("cmake", 3600)) == "timeout")
+check("gate-reason-infra",
+      M.gate_error_reason(OSError("no such file")) == "infra-error")
+check("gate-reason-other",
+      M.gate_error_reason(ValueError("x")) == "error")
+
+def _gatelab(repo, sd, num=99):
+    a = _mklab(repo, sd, [{"number": num, "title": "t"}])
+    a.base = "master"; a.batch = 10; a.max_prs = 50
+    a.targets = ["t"]; a.build_type = "Release"; a.jobs = 2
+    a.smoke_model = ""; a.bench_model = ""; a.pp = 32; a.tg = 32
+    a.regression_pct = 0; a.skip_ci_red = True
+    a.ppl_threshold = 0.0; a.ppl_sample = ""; a.build_timeout = 3600
+    return M.Lab(a)
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")[1].strip()
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "merged-pr")
+    lab = _gatelab(repo, sd)
+    def _hung(*a, **k):
+        raise _sp2.TimeoutExpired("cmake --build", 3600)
+    lab.build = _hung
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
+    counted = lab.run_gates(99, intent)
+    check("build-timeout-quarantined", counted is False)
+    check("build-timeout-reason",
+          any(q["pr"] == 99 and q["reason"] == "build-timeout" for q in lab.quar),
+          str(lab.quar))
+    check("build-timeout-reverted",
+          _git(repo, "rev-parse", "HEAD")[1].strip() == base)
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")[1].strip()
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "merged-pr")
+    lab = _gatelab(repo, sd)
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (False, "no throughput lines")
+    counted = lab.run_gates(99, {"area": "fix", "backends": [], "expects_bench_gain": False})
+    check("smoke-fail-quarantined", counted is False)
+    check("smoke-fail-reason",
+          any(q["pr"] == 99 and q["reason"] == "smoke-failed" for q in lab.quar),
+          str(lab.quar))
+    check("smoke-fail-reverted",
+          _git(repo, "rev-parse", "HEAD")[1].strip() == base)
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "merged-pr")
+    head = _git(repo, "rev-parse", "HEAD")[1].strip()
+    lab = _gatelab(repo, sd)
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    counted = lab.run_gates(99, {"area": "fix", "backends": [], "expects_bench_gain": False})
+    check("gates-pass-counted", counted is True)
+    check("gates-pass-kept", _git(repo, "rev-parse", "HEAD")[1].strip() == head)
+    check("gates-pass-merged", 99 in lab.state["merged"])
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    lab = _gatelab(repo, sd)
+    def _dead(*a, **k):
+        raise _sp2.TimeoutExpired("git", 1800)
+    lab.git = _dead
+    ok, reason = lab.merge_one_committed(99, "b")
+    check("merge-git-timeout", ok is False and str(reason).startswith("git-timeout"),
+          f"{ok} {reason}")
+
+# 14. evidence report (per-batch review: what improved, what didn't, why)
+state = {"merged": [29110, 29806], "quarantined": [28952],
+         "batches_done": 1, "bench_baseline": 40.0,
+         "bench_results": {
+             "29110": {"tg": 40.5, "base": 40.0, "verdict": "parity",
+                       "area": "perf", "backends": ["metal"], "expects_gain": False},
+             "29806": {"tg": 48.0, "base": 40.0, "verdict": "improvement",
+                       "area": "perf", "backends": ["cpu"], "expects_gain": True}}}
+quar = [{"pr": 28952, "reason": "merge-conflict", "detail": "CONFLICT in ggml.c"}]
+cands = [{"number": 29110, "title": "metal kernels"}, {"number": 29806, "title": "tinyBLAS"},
+         {"number": 28952, "title": "FP8 support"}]
+rep = M.build_report(state, quar, cands)
+check("report-counts", "merged: 2" in rep and "quarantined: 1" in rep, rep[:200])
+check("report-rows", "#29110" in rep and "#29806" in rep and "#28952" in rep)
+check("report-verdicts", "parity" in rep and "improvement" in rep)
+check("report-gains", "proven improvements (1)" in rep and "#29806" in rep.split("proven")[-1])
+check("report-empty-safe", "(none yet)" in M.build_report({"merged": []}, [], []))
+check("report-nonelist-safe", "merged: 0" in M.build_report(None, None, None))
+
+# 15. triage rate-limit abort (partial save + exit, not hours of 30s sleeps)
+from urllib.error import HTTPError as _HE
+from email.message import Message as _Msg
+from fetch_prs import is_rate_limit as _rl
+def _mkhttp(code, msg, remaining=None):
+    h = _Msg()
+    if remaining is not None:
+        h["X-RateLimit-Remaining"] = str(remaining)
+    return _HE("http://x", code, msg, h, None)
+check("rl-429", _rl(_mkhttp(429, "Too Many Requests")) is True)
+check("rl-403-empty", _rl(_mkhttp(403, "Forbidden", 0)) is True)
+check("rl-403-msg", _rl(_mkhttp(403, "API rate limit exceeded")) is True)
+check("rl-403-other", _rl(_mkhttp(403, "Forbidden", 59)) is False)
+check("rl-404", _rl(_mkhttp(404, "Not Found")) is False)
+check("rl-other-exc", _rl(ValueError("x")) is False)
+
+# 16. resilient pagination (transient retry, partial on persistent failure)
+from fetch_prs import collect_pages as _pages
+calls = {"n": 0}
+def _flaky(page):
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise ConnectionError("transient blip")
+    return ([{"number": page}], True)
+sleeps = []
+items, err = _pages(_flaky, 1000, sleep=lambda s: sleeps.append(s))
+check("pages-retry-ok", items == [{"number": 1}] and err is None, f"{items} {err}")
+check("pages-backoff", sleeps == [1, 2], str(sleeps))
+def _dead2(page):
+    if page == 1:
+        return ([{"number": 1}], False)
+    raise ConnectionError("down")
+items2, err2 = _pages(_dead2, 1000, sleep=lambda s: None)
+check("pages-partial", items2 == [{"number": 1}] and isinstance(err2, ConnectionError),
+      f"{items2} {err2}")
+def _full(page):
+    return ([{"number": page * 100 + i} for i in range(100)], False)
+items3, err3 = _pages(_full, 250, sleep=lambda s: None)
+check("pages-limit", len(items3) == 250 and err3 is None, str(len(items3)))
+items4, err4 = _pages(lambda p: ([], True), 1000, sleep=lambda s: None)
+check("pages-empty", items4 == [] and err4 is None)
+
+# 17. baseline follows the base SHA (stale baseline mislabels verdicts)
+def _baselab(sd, model):
+    a = _mklab("/tmp/llamapatch-norepo", sd, [{"number": 1, "title": "t"}])
+    a.base = "master"; a.batch = 10; a.max_prs = 50
+    a.targets = ["t"]; a.build_type = "Release"; a.jobs = 2
+    a.smoke_model = ""; a.bench_model = model; a.pp = 32; a.tg = 32
+    a.regression_pct = 15; a.skip_ci_red = True
+    a.ppl_threshold = 0.0; a.ppl_sample = ""; a.build_timeout = 3600
+    return M.Lab(a)
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.state["base_sha"] = "abc123"
+    calls = {"build": 0, "bench": 0}
+    lab.build = lambda: (calls.__setitem__("build", calls["build"] + 1) or (True, "ok"))
+    lab.bench = lambda: (calls.__setitem__("bench", calls["bench"] + 1) or (True, 42.0, "out"))
+    lab.ensure_baseline()
+    check("baseline-recorded",
+          lab.state["bench_baseline"] == 42.0 and lab.state["bench_baseline_sha"] == "abc123",
+          str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_sha")}))
+    lab.ensure_baseline()
+    check("baseline-cached", calls == {"build": 1, "bench": 1}, str(calls))
+    lab.state["base_sha"] = "def456"
+    lab.ensure_baseline()
+    check("baseline-rebuilt",
+          calls == {"build": 2, "bench": 2} and lab.state["bench_baseline_sha"] == "def456",
+          f"{calls} {lab.state.get('bench_baseline_sha')}")
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.state["base_sha"] = "abc123"
+    lab.build = lambda: (False, "configure boom")
+    lab.bench = lambda: (_ for _ in ()).throw(AssertionError("bench must not run"))
+    lab.ensure_baseline()
+    check("baseline-build-fail",
+          lab.state["bench_baseline"] is None and "bench_baseline_sha" not in lab.state)
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.state["base_sha"] = "abc123"
+    n = {"bench": 0}
+    lab.build = lambda: (True, "ok")
+    lab.bench = lambda: (n.__setitem__("bench", n["bench"] + 1) or (False, None, "unparsed"))
+    lab.ensure_baseline()
+    check("baseline-unparsed-sha",
+          lab.state["bench_baseline"] is None and lab.state["bench_baseline_sha"] == "abc123")
+    lab.ensure_baseline()
+    check("baseline-unparsed-no-loop", n == {"bench": 1}, str(n))
+
+# 18. clean start after kills (dirty tracked files must not fake conflicts)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 1, "title": "t"}])
+    lab = M.Lab(a)
+    lab.ensure_clean_start()
+    check("clean-start-clean", True)
+    open(os.path.join(repo, "f.txt"), "w").write("build regenerated me\n")
+    open(os.path.join(repo, "build-out.o"), "w").write("untracked artifact\n")
+    check("clean-start-sees-dirt", not lab.tracked_clean())
+    lab.ensure_clean_start()
+    check("clean-start-reset",
+          lab.tracked_clean() and open(os.path.join(repo, "f.txt")).read() == "v1\n")
+    check("clean-start-keeps-untracked",
+          os.path.exists(os.path.join(repo, "build-out.o")),
+          "untracked build outputs must survive")
+    check("clean-start-logged", "dirty-start-reset" in open(lab.log_f).read())
+
+# 19. model + bench-gate naming consistency (setup drift breaks every run)
+_here = os.path.dirname(__file__)
+_fm = open(os.path.join(_here, "fetch_models.sh")).read()
+_triage = open(os.path.join(_here, "triage-1k.sh")).read()
+_ml = open(os.path.join(_here, "merge_lab.py")).read()
+_cfg = json.load(open(os.path.join(_here, "config.json")))
+PART1 = "qwen2.5-7b-00001-of-00002.gguf"
+PART2 = "qwen2.5-7b-00002-of-00002.gguf"
+check("models-fetch-part1", PART1 in _fm and "q4_k_m-00001-of-00002" in _fm)
+check("models-fetch-part2", PART2 in _fm and "q4_k_m-00002-of-00002" in _fm)
+check("models-no-single-qwen", "qwen2.5-7b.gguf" not in _fm and "qwen2.5-7b.gguf" not in _ml,
+      "single-file Qwen URL 404s upstream; split parts required")
+check("models-triage-part1", PART1 in _triage)
+check("models-default-part1", PART1 in _ml)
+check("models-config-part1", _cfg["perf_model"]["file"] == PART1, str(_cfg["perf_model"]))
+check("models-tiny-url", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" in _fm)
+check("bench-defaults", "default=32" in _ml and "default=15.0" in _ml)
+
+# 20. run lock (concurrent loops sharing one state-dir corrupt state)
+with tempfile.TemporaryDirectory() as td:
+    M.acquire_lock(td)
+    lp = os.path.join(td, "lab.lock")
+    check("lock-file", os.path.exists(lp))
+    check("lock-pid", json.load(open(lp)).get("pid") == os.getpid())
+    try:
+        M.acquire_lock(td)
+        check("lock-second", False, "second acquire must raise")
+    except RuntimeError as e:
+        check("lock-second", "another run may be active" in str(e), str(e)[:150])
+    M.release_lock(td)
+    check("lock-released", not os.path.exists(lp))
+    M.acquire_lock(td)
+    check("lock-reacquire", os.path.exists(lp))
+    M.release_lock(td)
+    M.release_lock(td)  # missing file must not raise
+    check("lock-release-idempotent", True)
+
+# 21. force-unlock override (explicit operator intent only)
+with tempfile.TemporaryDirectory() as td:
+    cf = os.path.join(td, "c.json")
+    json.dump([{"number": 1}], open(cf, "w"))
+    class _AF: pass
+    a = _AF(); a.repo = os.path.join(td, "norepo"); a.state_dir = td
+    a.candidates = cf; a.force_unlock = False
+    lab = M.Lab(a)
+    M.acquire_lock(td)
+    check("force-off-keeps-lock", lab.maybe_force_unlock() is False
+          and os.path.exists(os.path.join(td, "lab.lock")))
+    a.force_unlock = True
+    check("force-on-clears", lab.maybe_force_unlock() is True
+          and not os.path.exists(os.path.join(td, "lab.lock")))
+    check("force-logged", "force-unlock" in open(lab.log_f).read())
+    check("force-absent", lab.maybe_force_unlock() is False)
+
+# 22. transient quarantines retry via doctor (network blips must not kill PRs)
+check("transient-fetch", M.is_transient_quarantine("fetch-failed") is True)
+check("transient-timeout", M.is_transient_quarantine("git-timeout: blah") is True)
+check("transient-giterr", M.is_transient_quarantine("git-error: blah") is True)
+check("transient-conflict", M.is_transient_quarantine("merge-conflict: blah") is False)
+check("transient-build", M.is_transient_quarantine("build-failed") is False)
+check("transient-empty", M.is_transient_quarantine("") is False)
+check("transient-none", M.is_transient_quarantine(None) is False)
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 5}, {"number": 6}, {"number": 8}])
+    a.base = "master"
+    lab = M.Lab(a)
+    lab.state["base_sha"] = _git(repo, "rev-parse", "HEAD")[1].strip()
+    lab.state["merged"] = [7]
+    lab.state["quarantined"] = [5, 6, 8]
+    lab.quar = [{"pr": 5, "reason": "fetch-failed", "detail": "fetch-failed"},
+                {"pr": 6, "reason": "merge-conflict", "detail": "CONFLICT"},
+                {"pr": 8, "reason": "git-timeout", "detail": "git-timeout: hung"}]
+    lab.save()
+    lab.doctor()
+    check("doctor-drops-phantom", lab.state["merged"] == [], str(lab.state["merged"]))
+    check("doctor-keeps-conflict",
+          [q["pr"] for q in lab.quar] == [6], str(lab.quar))
+    check("doctor-requeues-transient", lab.state["quarantined"] == [6],
+          str(lab.state["quarantined"]))
+
+# 23. quarantine dedup (retry cycles must not grow the file unboundedly)
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    a = _mklab(os.path.join(td, "norepo"), sd, [{"number": 9}])
+    lab = M.Lab(a)
+    lab.quarantine(9, "fetch-failed", "blip")
+    lab.quarantine(9, "fetch-failed", "blip again")
+    check("quar-dedup",
+          len(lab.quar) == 1 and lab.state["quarantined"] == [9],
+          f"{lab.quar} {lab.state['quarantined']}")
+    lab.quarantine(9, "merge-conflict", "now a real conflict")
+    check("quar-new-reason-kept",
+          len(lab.quar) == 2
+          and [q["reason"] for q in lab.quar] == ["fetch-failed", "merge-conflict"],
+          str(lab.quar))
+
+print(f"\n{len(FAIL)} failures")
+sys.exit(1 if FAIL else 0)

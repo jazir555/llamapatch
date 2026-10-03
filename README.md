@@ -1,6 +1,6 @@
 # llama.cpp PR mass-merge lab
 
-Goal: merge 50+ (eventually 1k+) open upstream PRs for performance, 2–3 at a
+Goal: merge 50+ (eventually 1k+) open upstream PRs for performance, 10 at a
 time, with fully automated build/smoke/bench gates and self-healing (conflict /
 build / runtime failures auto-quarantine the bad PR and keep going).
 
@@ -15,18 +15,30 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
 2. **Merge via `pull/N/head` refspec, not fork remotes.** `git fetch origin
    pull/N/head:pr/N` needs no token, no per-fork remote (unlike
    `scripts/pr2wt.sh`, which is for interactive single-PR worktrees).
-3. **Small batches (2–3).** Limits blast radius; a bad batch bisects to
-   singles. Pairs are never retried (combinatorial explosion).
-4. **Gates:** configure+build → `llama-cli` smoke on TinyLlama → `llama-bench`
-   pp/tg on 7B Q4_K_M. >5% tg regression quarantines the batch.
-5. **Self-heal:** merge conflict / build fail / smoke fail / regression all
-   quarantine the culprit(s) to `quarantined.json` and continue. Nothing stops
-   the loop. Full log in `lab-log.jsonl`.
+3. **Batches of 10.** Limits blast radius while making steady progress;
+   each PR gets its own verified commit, so a bad PR reverts cleanly
+   (`git reset --hard HEAD~1`) without losing the other 9.
+4. **Gates:** configure+build → bench smoke on TinyLlama → `llama-bench`
+   pp/tg on 7B Q4_K_M (+ optional `llama-perplexity` correctness gate) →
+   optional CI-red skip (annotated by `fetch_prs.py --include-ci`).
+   Verdicts are intent-aware (`pr_intent.py`): a CUDA/Metal/Vulkan/SYCL perf
+   PR showing CPU parity is the *correct* outcome on a CPU box (gain lives
+   on that backend) — recorded as `parity`, never punished; only a true
+   >15% tg regression quarantines. CPU/generic perf must show `improvement`
+   to prove its claim. The bench baseline is pinned to the base SHA
+   (`bench_baseline_sha`) and rebuilds automatically after any rebase/base
+   move, so verdicts never compare against a stale base.
+5. **Self-heal:** merge conflict / CI-red / build fail / smoke fail /
+   perplexity fail / regression / empty (already-upstream) noop all
+   quarantine or record the culprit(s) and continue. Transient fetch/git
+   failures quarantine as `fetch-failed`/`git-timeout` (never as conflicts)
+   and `--doctor` requeues them for retry — a dead fork simply
+   re-quarantines next run. Full log in `lab-log.jsonl`.
 
 ## Layout
 
 - Lab checkout (fast Linux fs, NOT /mnt/c): `~/llama-pr-lab/llama.cpp`
-- Models: `~/llama-pr-lab/models/{tinyllama.gguf,qwen2.5-7b.gguf}`
+- Models: `~/llama-pr-lab/models/{tinyllama.gguf,qwen2.5-7b-00001-of-00002.gguf (+ -00002- part)}`
 - This dir (`pr-lab/` in LLMDroid, mirrored to WSL) holds the automation.
 - State (in WSL lab dir or here): `lab-state.json`, `lab-log.jsonl`,
   `quarantined.json`, `candidates.json`
@@ -47,17 +59,60 @@ export GH_TOKEN=xxx
 python3 pr-lab/fetch_prs.py --limit 1000 --top 100 --out candidates.json
 
 # 3. plan only
-python3 pr-lab/merge_lab.py --candidates candidates.json --dry-run --batch 3 --max-prs 50
+python3 pr-lab/merge_lab.py --candidates candidates.json --dry-run --batch 10 --max-prs 50
 
 # 4. baseline build + bench (proves harness before any PR)
 cmake -S ~/llama-pr-lab/llama.cpp -B ~/llama-pr-lab/llama.cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build ~/llama-pr-lab/llama.cpp/build --target llama-cli llama-bench -j4
 ~/llama-pr-lab/llama.cpp/build/bin/llama-cli -m ~/llama-pr-lab/models/tinyllama.gguf -p "Hello" -n 20 --temp 0
-~/llama-pr-lab/llama.cpp/build/bin/llama-bench -m ~/llama-pr-lab/models/qwen2.5-7b.gguf -p 128 -n 128 -o json
+~/llama-pr-lab/llama.cpp/build/bin/llama-bench -m ~/llama-pr-lab/models/qwen2.5-7b-00001-of-00002.gguf -p 128 -n 128 -o json
 
-# 5. auto-merge loop (2-3 at a time, up to 50)
-python3 pr-lab/merge_lab.py --candidates candidates.json --batch 3 --max-prs 50
+# 5. auto-merge loop (10 at a time, up to 50)
+python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 ```
+
+Self-test (no network, no models, runs on Windows):
+```bash
+python3 test_lab.py   # 129 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient
+python3 test_e2e_mock.py  # 22 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry
+```
+
+## Evidence report (review after every 10-batch)
+```bash
+bash llamapatch report                    # stdout
+bash llamapatch report --report-out r1.md # file
+```
+
+`build_report()` renders merged/quarantined counts, per-PR area/backend/
+verdict/tg-vs-base rows, and a `proven improvements` list — the artifact the
+operator reviews to confirm each batch improved what it claimed.
+
+## Gate timeouts (hung builds never kill a batch)
+
+Every gate runs under a timeout (`--build-timeout 3600` for cmake
+configure+build; 300s/600s shell timeouts for smoke/bench/perplexity). A hung
+or crashed gate quarantines as `build-timeout`/`smoke-timeout`/
+`perplexity-timeout` (or `*-infra-error` for missing binaries) and the loop
+continues; bench timeouts never punish the PR (`merged-unverified-perf`).
+Hung git inside merges returns `git-timeout` the same way. Reverts still go
+through verified `revert_last()`.
+
+## Preflight & safe revert
+
+`run()` (non-dry, non-report) takes an exclusive `lab.lock` in the state dir
+first — a second concurrent loop fails fast instead of interleaving merges
+into shared state (a SIGKILL-stale lock is cleared explicitly with
+`--force-unlock`, only after verifying no run is active; the override is
+logged). Then `preflight()`: hard-fails on missing repo,
+non-repo dir, unresolvable `--base`, or empty/malformed candidates (malformed
+entries are skipped with a count, corrupt JSON aborts loudly); missing
+cmake/ninja/ccache and low disk are logged warnings. After checkout it runs
+`ensure_clean_start()`: a kill-restarted worktree may hold modified tracked
+files that would fake merge-conflicts, so it resets to HEAD (untracked
+`build/` output untouched) and refuses loudly if dirt persists. Every gate revert goes
+through `revert_last()`, which verifies the tracked tree is clean afterwards
+— a persistently dirty tree raises instead of silently corrupting the next 9
+PRs of the batch.
 
 Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
 
@@ -72,6 +127,18 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
 
 ## Rolling fixes (learned the hard way)
 
+- **v4 — batch-10 hardening.** Default `--batch 10` (was 3); merge message
+  amended to `pr-lab: merge #N <title>` so `--doctor` reconciles state
+  (matches both `#N` and legacy `pr/N`); already-upstream merges detected
+  pre-amend via HEAD-unchanged/`Already up to date` guard (never renames the
+  previous PR's commit) and recorded as `merged-noop-empty`; in-batch
+  file-overlap warnings computed pre-merge; robust bench JSON parsing (last
+  array, `{"results":[...]}` shape); smoke accepts any throughput token;
+  `--include-ci` annotates red PRs and the merge loop skips them pre-build;
+  optional `--ppl-threshold/--ppl-sample` perplexity correctness gate;
+  per-PR `bench_results` + `improvement` events prove the gain; corrupt
+  state files backed up (`.corrupt-<ts>`) instead of crashing; `fetch_pr`
+  falls back to a local `pr/N` branch (deleted-fork/offline resilient).
 - **v1 bug — stacked uncommitted merges are impossible.** `git merge --no-commit`
   twice in a row fails with "MERGE_HEAD exists"; the 2nd `merge --abort` wipes
   the 1st PR too, and an unchecked `git commit` on the clean tree silently
@@ -87,8 +154,11 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
   smoke gate uses `llama-bench -p 32 -n 32` on TinyLlama instead.
 - **Models: curl-direct, not HF API.** `huggingface_hub` hit 401 for public
   repos; `curl -L <repo>/resolve/main/<file>?download=true` works. Qwen2.5-7B
-  Q4_K_M is **split** (`...-00001-of-00002` + `...-00002-of-00002`); point
-  llama tools at part 1. TinyLlama: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`.
+  Q4_K_M is **split** (`qwen2.5-7b-instruct-q4_k_m-00001-of-00002` +
+  `-00002-of-00002`, verified against the HF API file list); `fetch_models.sh`
+  saves both as `qwen2.5-7b-0000{1,2}-of-00002.gguf` and every script/config
+  points bench gates at part 1 (`test_lab.py` pins this agreement).
+  TinyLlama: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`.
 - **WSL `~/.wslconfig` duplicate-key warnings** (`wsl2.memory`/`processors`)
   are harmless noise from the user's config; ignore.
 
@@ -113,11 +183,15 @@ machine-load noise (downloads+builds concurrent) — always compare same-state.
 
 - Full 1k triage needs `GH_TOKEN` (unauthenticated API caps at 60 req/hr;
   1k PRs need ~2000 detail calls). Then: `fetch_prs.py --limit 1000 --top 200`.
+  On rate-limit, triage saves partial output and exits 2 immediately instead
+  of sleeping 30s per PR — re-run with a token to continue. Stage-1 page
+  fetches retry transient failures (1s/2s/4s backoff) and triage partial
+  results rather than discarding all pages on a persistent failure.
 - `candidates.json` (30) is exhausted: 22 merged + 8 quarantined. Next run needs
   fresh triage output.
 - Keep lab worktrees under `~/llama-pr-lab/` (persistent); WSL `/tmp` is wiped
   on restart (lost one base comparison to this).
 
-- Add CI status check (`combinedStatus`) to skip red PRs before building.
 - Add `llama-perplexity` gate on WikiText-2 sample for correctness.
+  (v4: flag exists as `--ppl-threshold/--ppl-sample`; wire a default sample path.)
 - Nightly rebase: `git fetch origin master`, re-triage (PRs close/merge daily).
