@@ -152,22 +152,28 @@ def main():
 
     staged = []
     for pr in all_prs:
-        labels = [l["name"].lower() for l in pr.get("labels", [])]
+        if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
+            continue  # malformed list item: no number, nothing to merge
+        labels = [(l.get("name", "") if isinstance(l, dict) else str(l)).lower()
+                  for l in pr.get("labels", [])]
         if any(x in labels for x in cfg["exclude_labels"]):
             continue
         if pr.get("draft"):
             continue  # skip drafts in auto-merge; review manually later
         s, hits = score_title(pr.get("title"), pr.get("body"), cfg)
-        staged.append({"number": pr["number"], "title": pr["title"],
-                       "user": pr["user"]["login"], "updated": pr["updated_at"],
+        staged.append({"number": pr["number"], "title": pr.get("title", ""),
+                       "user": (pr.get("user") or {}).get("login", ""),
+                       "updated": pr.get("updated_at", ""),
                        "labels": labels, "score": s, "hits": hits,
-                       "head": pr["head"]["sha"][:8]})
+                       "head": ((pr.get("head") or {}).get("sha", "") or "")[:8]})
     staged.sort(key=lambda x: (-x["score"], x["updated"]))
     print(f"stage-1 survivors: {len(staged)} (drafts/excluded removed)")
 
     # Stage 2: enrich top-N with mergeable + files (+ optional CI status)
     top = staged[:a.top]
     rate_limited = False
+    abort_reason = ""
+    consec_errors = 0
     for i, c in enumerate(top):
         n = c["number"]
         try:
@@ -201,6 +207,7 @@ def main():
                 print(f"[{i+1}/{len(top)}] #{n} mergeable={c['mergeable_state']} ci={c.get('ci_state')} files={c['changed_files']} score={c['score']}")
             else:
                 print(f"[{i+1}/{len(top)}] #{n} mergeable={c['mergeable_state']} files={c['changed_files']} score={c['score']}")
+            consec_errors = 0
         except urllib.error.HTTPError as e:
             c["error"] = f"HTTP {e.code}: {e.reason}"
             if is_rate_limit(e):
@@ -211,6 +218,15 @@ def main():
                 break
             print(f"[{i+1}/{len(top)}] #{n} ERROR {c['error']} (backing off 30s)")
             time.sleep(30)
+            consec_errors += 1
+            if consec_errors >= 5:
+                # Systematic failure (revoked token, dead API, proxy): 200
+                # PRs x 30s sleeps would burn hours. Save partial like the
+                # rate-limit path and let the operator re-run.
+                print(f"5 consecutive stage-2 errors — aborting triage, "
+                      f"partial output saved next. Last: {c['error']}")
+                abort_reason = "consecutive-errors"
+                break
         except Exception as e:
             c["error"] = str(e)
             print(f"[{i+1}/{len(top)}] #{n} ERROR {e}")
@@ -223,6 +239,10 @@ def main():
     if rate_limited:
         print("EXIT: rate-limited, partial triage saved. Export GH_TOKEN and re-run.",
               file=sys.stderr)
+        sys.exit(2)
+    if abort_reason:
+        print(f"EXIT: {abort_reason}, partial triage saved. Fix the API/token "
+              f"problem and re-run.", file=sys.stderr)
         sys.exit(2)
     print("Top 15:")
     for c in top[:15]:

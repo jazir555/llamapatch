@@ -1389,6 +1389,90 @@ _srv = _ci({"number": 5, "title": "faster parallel decoding",
 check("intent-server-cpu-visible", _srv["expects_bench_gain"], str(_srv))
 check("intent-backends-pure", _db({"labels": ["CUDA"], "title": "", "files": []}) == ["cuda"])
 
+# 52. stage-2 enrichment end to end (mocked API, real main())
+import fetch_prs as F
+import urllib.request as _ur
+_PRS52 = [
+    {"number": 11, "title": "faster sgemm kernels", "body": "",
+     "user": {"login": "a"}, "updated_at": "2026-01-02T00:00:00Z",
+     "labels": [{"name": "ggml"}], "draft": False, "head": {"sha": "a" * 40}},
+    {"number": 12, "title": "fix crash on load", "body": "",
+     "labels": [{"name": "bug"}, "oops"], "draft": False},  # no head/user
+    {"number": "x", "title": "junk"},  # skipped: no int number
+    "junk-string",                      # skipped: not a dict
+    {"number": 13, "title": "wip experiment", "body": "", "user": {"login": "b"},
+     "updated_at": "2026-01-03T00:00:00Z", "labels": [], "draft": True},
+]
+_DET52 = {
+    11: {"mergeable": True, "mergeable_state": "clean", "additions": 100,
+         "deletions": 50, "changed_files": 2, "head": {"sha": "b" * 40}},
+    12: {"mergeable": False, "mergeable_state": "dirty", "additions": 1500,
+         "deletions": 800, "changed_files": 3, "head": {"sha": "c" * 40}},
+}
+_FILES52 = {11: ["ggml/src/ggml-cpu/sgemm.cpp", "ggml/src/ggml-cpu/x.cpp"],
+            12: ["src/llama.cpp"]}
+_CI52 = {"b" * 40: "success", "c" * 40: "failure"}
+def _mockreq52(url, token, timeout=60):
+    if url.endswith("/files?per_page=100"):
+        n = int(url.split("/pulls/")[1].split("/")[0])
+        return ([{"filename": p} for p in _FILES52[n]], None)
+    if "/commits/" in url:
+        sha = url.rstrip("/").split("/")[-2]
+        return ({"state": _CI52[sha], "statuses": [{}, {}]}, None)
+    if "/pulls/" in url and "state=open" not in url:
+        return (_DET52[int(url.rstrip("/").split("/")[-1])], None)
+    return (list(_PRS52), None)
+_argv52, _req52, _sleep52 = sys.argv, F.req, F.time.sleep
+F.time.sleep = lambda s: None
+try:
+    with tempfile.TemporaryDirectory() as td52:
+        _out52 = os.path.join(td52, "cands.json")
+        sys.argv = ["fetch_prs.py", "--limit", "10", "--top", "5",
+                    "--out", _out52, "--include-ci", "--ci-sleep", "0"]
+        F.req = _mockreq52
+        F.main()
+        _got52 = {c["number"]: c for c in json.load(open(_out52))}
+        check("stage2-skips-malformed", sorted(_got52) == [11, 12], str(sorted(_got52)))
+        check("stage2-head-default", _got52[12]["head"] == "" and _got52[12]["user"] == "")
+        _c11, _c12 = _got52[11], _got52[12]
+        check("stage2-head-full", _c11["head_full"] == "b" * 40 and _c12["head_full"] == "c" * 40)
+        check("stage2-perf-bonus", "touches-perf-path" in _c11["hits"] and _c11["score"] >= 4,
+              f"{_c11['score']} {_c11['hits']}")
+        check("stage2-penalties", "dirty-penalty" in _c12["hits"]
+              and "large-diff-penalty" in _c12["hits"]
+              and "ci-red-penalty" in _c12["hits"] and _c12.get("ci_state") == "failure",
+              f"{_c12['score']} {_c12['hits']}")
+        check("stage2-intent", _c11["intent"]["expects_bench_gain"] is True
+              and _c12["intent"]["area"] == "fix",
+              f"{_c11['intent']} {_c12['intent']}")
+        check("stage2-order", _c11["score"] > _c12["score"])
+
+    # breaker: systematic stage-2 failure aborts fast with partial output
+    _plist52 = [{"number": 20 + i, "title": f"pr {i}", "body": "",
+                 "user": {"login": "u"}, "updated_at": "2026-01-01T00:00:00Z",
+                 "labels": [], "draft": False, "head": {"sha": "d" * 40}}
+                for i in range(6)]
+    def _deadreq52(url, token, timeout=60):
+        if "state=open" in url:
+            return (list(_plist52), None)
+        raise _ur.HTTPError(url, 404, "Not Found", None, None)
+    with tempfile.TemporaryDirectory() as td52b:
+        _out52b = os.path.join(td52b, "cands.json")
+        sys.argv = ["fetch_prs.py", "--limit", "10", "--top", "6",
+                    "--out", _out52b, "--ci-sleep", "0"]
+        F.req = _deadreq52
+        try:
+            F.main()
+            check("breaker-exits", False, "main must sys.exit(2)")
+        except SystemExit as e:
+            check("breaker-exits", e.code == 2, f"exit={e.code}")
+        _part52 = json.load(open(_out52b))
+        check("breaker-partial", len(_part52) == 6
+              and all("error" in c for c in _part52[:5]),
+              str([(c["number"], c.get("error")) for c in _part52]))
+finally:
+    sys.argv, F.req, F.time.sleep = _argv52, _req52, _sleep52
+
 # 44. fallback without triaged head_full merges (unenriched candidates skip
 # the freshness check instead of blocking on it)
 with tempfile.TemporaryDirectory() as td:
@@ -1422,7 +1506,6 @@ check("dispatcher-forwards-flags",
       _dispatcher45.count('"$@"') >= 3, "merge/dry/doctor/report forward flags")
 
 # 47. triage scoring contract (wrong picks waste whole 10-batches)
-import fetch_prs as F
 _tcfg = {"perf_keywords": ["fix", "bug", "cuda", "flash attention", "q4_0"],
          "perf_paths": ["ggml/src", "src/", "common/"]}
 check("score-hits", F.score_title("vulkan cuda kernels", "", _tcfg)[0] >= 1)
