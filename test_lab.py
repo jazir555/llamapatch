@@ -1314,6 +1314,36 @@ _rep48s = M.build_report(
     [], [{"number": 7, "title": "seven"}])
 check("report-runs-single-quiet", "(2 runs)" not in _rep48s and "(n=2)" not in _rep48s)
 
+# 49. crash-safe state saves (a kill mid-write must not corrupt campaigns)
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    p = os.path.join(sd, "x.json")
+    M.atomic_write_json(p, {"a": [1, 2, 3]})
+    check("atomic-roundtrip", json.load(open(p)) == {"a": [1, 2, 3]})
+    check("atomic-no-tmp", [f for f in os.listdir(sd) if ".tmp-" in f] == [],
+          str(os.listdir(sd)))
+    M.atomic_write_json(p, {"b": "overwritten"})
+    check("atomic-replace", json.load(open(p)) == {"b": "overwritten"})
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    a = _mklab(os.path.join(td, "norepo"), sd, [{"number": 9}])
+    lab = M.Lab(a)
+    lab.state["merged"] = [8]
+    lab.state["bench_baseline_runs"] = [40.0, 44.0]
+    lab.quarantine(9, "fetch-failed", "blip")
+    lab2 = M.Lab(_mklab(os.path.join(td, "norepo"), sd, [{"number": 9}]))
+    check("save-state-survives",
+          lab2.state["merged"] == [8]
+          and lab2.state.get("bench_baseline_runs") == [40.0, 44.0],
+          str(lab2.state))
+    check("save-quar-survives",
+          [q["pr"] for q in lab2.quar] == [9]
+          and lab2.state["quarantined"] == [9],
+          f"{lab2.quar} {lab2.state['quarantined']}")
+    check("save-no-tmp-left", [f for f in os.listdir(sd) if ".tmp-" in f] == [],
+          str(os.listdir(sd)))
+
 # 44. fallback without triaged head_full merges (unenriched candidates skip
 # the freshness check instead of blocking on it)
 with tempfile.TemporaryDirectory() as td:

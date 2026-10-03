@@ -131,6 +131,19 @@ def lock_path(state_dir):
     return os.path.join(state_dir, "lab.lock")
 
 
+def atomic_write_json(path, obj):
+    """Crash-safe JSON write: tmp + fsync + atomic rename. A SIGKILL can
+    only ever leave a stale tmp file behind — the live file is either the
+    old or the new complete document, never truncated. (Load already
+    quarantines corrupt files, but with this it should never fire.)"""
+    tmp = path + f".tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def acquire_lock(state_dir):
     """Fail-fast mutual exclusion for one state-dir.
 
@@ -304,10 +317,12 @@ class Lab:
             self.quar = []
 
     def save(self):
-        with open(self.state_f, "w") as f:
-            json.dump(self.state, f, indent=2)
-        with open(self.quar_f, "w") as f:
-            json.dump(self.quar, f, indent=2)
+        # Quarantine file FIRST: a kill between the two writes must leave
+        # at most a retry (detail row without membership), never a silent
+        # skip (membership without detail row: pending excludes it and
+        # doctor can't requeue what it can't see).
+        atomic_write_json(self.quar_f, self.quar)
+        atomic_write_json(self.state_f, self.state)
 
     def log(self, **kw):
         kw["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
