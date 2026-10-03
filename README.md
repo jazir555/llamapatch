@@ -32,7 +32,10 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
    their intent via green correctness gates + no regression. The bench
    baseline is pinned to the base SHA (`bench_baseline_sha`) and rebuilds
    automatically after any rebase/base move, so verdicts never compare
-   against a stale base.
+   against a stale base — and it is never taken on a branch already holding
+   campaign merges (that would bake PR gains into the baseline and
+   manufacture false regressions); then it defers loudly and gates fall
+   back to unverified.
 5. **Self-heal:** merge conflict / build fail / smoke fail /
    perplexity fail / regression / no-improvement / empty (already-upstream)
    noop all quarantine or record the culprit(s) and continue. CI-red PRs are
@@ -86,7 +89,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 190 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost
+python3 test_lab.py   # 193 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer
 python3 test_e2e_mock.py  # 34 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry
 ```
 

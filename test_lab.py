@@ -935,5 +935,33 @@ with tempfile.TemporaryDirectory() as td:
           and lab.state["bench_results"]["71"]["verdict"] == "late-build-failed",
           f"{st} {lab.state['bench_results']}")
 
+# 33. never baseline a merged tree (poisoned baseline => false regressions)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")[1].strip()
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "campaign-merge")
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.repo = repo
+    lab.state["base_sha"] = base
+    calls = {"build": 0, "bench": 0}
+    lab.build = lambda: (calls.__setitem__("build", calls["build"] + 1) or (True, "ok"))
+    lab.bench = lambda: (calls.__setitem__("bench", calls["bench"] + 1) or (True, 99.0, "x"))
+    lab.ensure_baseline()
+    check("baseline-deferred", calls == {"build": 0, "bench": 0}
+          and lab.state["bench_baseline"] is None, f"{calls}")
+    check("baseline-deferred-logged", "baseline-deferred" in open(lab.log_f).read())
+    _git(repo, "checkout", base)
+    lab.ensure_baseline()
+    check("baseline-clean-head",
+          calls == {"build": 1, "bench": 1} and lab.state["bench_baseline"] == 99.0,
+          f"{calls} {lab.state.get('bench_baseline')}")
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

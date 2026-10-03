@@ -695,6 +695,12 @@ class Lab:
         versa), so a SHA mismatch rebuilds. Records bench_baseline_sha even
         when the bench is unparsed so a broken bench doesn't rebuild every
         run — the next base change retries.
+
+        Never baselines a dirty HEAD: if campaign merges are already on the
+        branch (model arrived late, first baseline failed), benching now
+        would poison every future verdict with PR improvements baked in —
+        a machine for false perf-regressions. Defer loudly instead; gates
+        fall back to unverified, never to wrong numbers.
         """
         if not self.a.bench_model or (self.a.regression_pct or 0) <= 0:
             return
@@ -704,6 +710,21 @@ class Lab:
         model = os.path.expanduser(self.a.bench_model)
         if not (os.path.exists(model) or os.path.exists(model + ".1")):
             print("bench model absent, skipping baseline bench", flush=True)
+            return
+        rc, head = None, ""
+        try:
+            # Best-effort only: preflight already validated the repo, so a
+            # failure here must not crash the run — fall through to the
+            # normal baseline path.
+            rc, head = self.git("rev-parse HEAD")
+            head = head.strip() if rc == 0 else ""
+        except Exception:
+            head = ""
+        if head and self.state.get("base_sha") and head != self.state["base_sha"]:
+            print("baseline deferred: HEAD holds campaign merges, "
+                  "baseline must come from the clean base", flush=True)
+            self.log(event="baseline-deferred", head=head[:8],
+                     base=(self.state.get("base_sha") or "")[:8])
             return
         ok, out = self.build()
         print(f"baseline build: {'OK' if ok else 'FAIL'}", flush=True)
