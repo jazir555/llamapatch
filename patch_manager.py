@@ -119,7 +119,7 @@ async function release(ns){const b={candidates:val('cands'),state_dir:val('state
 async function doctor(){const b={candidates:val('cands'),repo:val('repo'),state_dir:val('statedir')};const r=await api('/api/doctor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 function sort(k){if(SORTK===k)SORTD*=-1;else{SORTK=k;SORTD=1}render();return false}
 async function runs(){const d=await api('/api/runs');document.getElementById('runs').textContent=d.runs.length?d.runs.map(r=>`#${r.id} ${r.kind} ${r.status}${r.rc==null?'':' rc='+r.rc}${r.merged_n==null?'':` M${r.merged_n}/Q${r.quar_n??0}`}`).join(String.fromCharCode(10)):'(no runs)'}
-async function versions(){const q=new URLSearchParams({repo:val('repo')});const d=await api('/api/refs?'+q);const dl=document.getElementById('refs');dl.innerHTML='';for(const b of [...(d.branches||[]),...(d.tags||[])]){const o=document.createElement('option');o.value=b;dl.appendChild(o)}const slug=val('slug');const origin=(d.origin||'').toLowerCase();if(slug&&origin&&!origin.includes(slug.toLowerCase())){document.getElementById('rep').textContent=`WARNING: checkout origin ${d.origin} does not match slug ${slug} — merging across repos produces nonsense. Fix one of them before merging.`}}
+async function versions(){const q=new URLSearchParams({repo:val('repo')});const d=await api('/api/refs?'+q);const dl=document.getElementById('refs');dl.innerHTML='';for(const b of [...(d.branches||[]),...(d.tags||[])]){const o=document.createElement('option');o.value=b;dl.appendChild(o)}const slug=val('slug');const origin=(d.origin||'').toLowerCase();if(slug&&origin&&!origin.includes(slug.toLowerCase())){document.getElementById('rep').textContent=`WARNING: checkout origin ${d.origin} does not match slug ${slug} — merging across repos produces nonsense. Fix one of them before merging.`}if(d.dirty){document.getElementById('rep').textContent+=`${d.dirty} dirty file(s) in checkout (e.g. ${(d.dirty_sample||[]).join(', ')}) — the merge loop resets tracked changes to HEAD on start.`}}
 function selKey(){return 'llamapatch-sel:'+val('cands')}
 function savedChecks(){try{const s=JSON.parse(localStorage.getItem(selKey())||'null');return Array.isArray(s)?new Set(s):null}catch(e){return null}}
 function saveChecks(){try{localStorage.setItem(selKey(),JSON.stringify(selected()))}catch(e){}}
@@ -234,8 +234,11 @@ class PatchApp:
         tags = _run(["tag", "--sort=-creatordate"]) or []
         head = _run(["rev-parse", "--short", "HEAD"]) or [""]
         origin = _run(["config", "--get", "remote.origin.url"]) or [""]
+        dirt = _run(["status", "--porcelain"]) or []
         return {"branches": branches[:100], "tags": tags[:50],
-                "head": head[0], "origin": origin[0]}, None
+                "head": head[0], "origin": origin[0],
+                "dirty": len(dirt),
+                "dirty_sample": dirt[:5]}, None
 
     @staticmethod
     def verify_ref(repo, ref):

@@ -2289,6 +2289,25 @@ with tempfile.TemporaryDirectory() as td69:
           and _r69.get("origin") == "https://github.com/acme/widgets.git",
           body[:200])
 
+# 70. refs report checkout dirt (merge loop resets tracked changes)
+with tempfile.TemporaryDirectory() as td70:
+    repo = os.path.join(td70, "repo")
+    os.makedirs(repo)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    st, body = _get60("/api/refs?repo=" + _up60.quote(repo))
+    check("gui-refs-clean", st == 200 and json.loads(body).get("dirty") == 0,
+          body[:200])
+    open(os.path.join(repo, "f.txt"), "w").write("v1\ndirty\n")
+    open(os.path.join(repo, "new.txt"), "w").write("untracked\n")
+    st, body = _get60("/api/refs?repo=" + _up60.quote(repo))
+    _r70 = json.loads(body)
+    check("gui-refs-dirty", st == 200 and _r70.get("dirty") == 2
+          and any("f.txt" in s for s in _r70.get("dirty_sample", [])),
+          body[:300])
+
 # 63. merge tuning passthrough, runs list, page JS parses under node
 with tempfile.TemporaryDirectory() as td63:
     cf63 = os.path.join(td63, "c.json")
