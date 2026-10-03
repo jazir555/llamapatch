@@ -134,7 +134,7 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
 
 ## What to expect
 
-- ~17 builds for 50 PRs in batches of 3, ~5–10 min each on 4 cores → a few hours.
+- ~50 incremental builds for 50 PRs in batches of 10 (plus one baseline build), ~5–10 min each on 4 cores → a few hours.
   Use `ccache` (auto-detected) to cut rebuilds.
 - Most of 1k+ PRs will NOT be perf PRs and many conflict; expect high quarantine
   rate. That's normal — the log tells you which ones and why.
@@ -177,6 +177,30 @@ Resume: re-run step 5; it loads `lab-state.json` and skips merged/quarantined.
   TinyLlama: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`.
 - **WSL `~/.wslconfig` duplicate-key warnings** (`wsl2.memory`/`processors`)
   are harmless noise from the user's config; ignore.
+- **v5 — measurement + provenance hardening.**
+  - *Noise guard* (`--bench-noise-pct 5`, `0` disables): boundary verdicts
+    (regression just under the line, improvement just over it, parity just
+    under the gain line that would roll back a claimed gain) earn one
+    confirmation run; verdict on the mean, both runs stored in
+    `bench_results[].runs`. Applies to per-PR gates AND the post-run final
+    gate (no noisy heal-reverts; `late-regression` details carry `runs=`).
+    The baseline anchors on the mean of two runs per base SHA — every
+    verdict of the campaign compares against that one number. The report
+    shows `(2 runs)` on confirmed rows and `(n=2)` on the baseline.
+  - *Provenance SHAs:* every kept merge records the tested head SHA
+    (`merged_heads`, `head` column in the report). A local-fallback merge
+    against a stale ref is refused (`fetch-failed: stale …`, retried by
+    `--doctor`) instead of silently gating outdated code. Heal reverts and
+    doctor phantom-drops prune the entry; `--doctor` warns (persisted in
+    state + report section) when a merge commit's second parent differs
+    from the tested SHA.
+  - *Crash-safe state:* atomic tmp+fsync+rename saves, quarantine file
+    first — a kill between writes leaves at most a retry, never a silent
+    skip. The lock error points at `--force-unlock`.
+  - *Triage:* malformed list items (non-int number, missing head/user, odd
+    labels) skip instead of crashing the 1k run; 5 consecutive stage-2
+    errors abort with partial output (exit 2) instead of hours of 30s
+    backoffs. `triage-1k.sh` forwards extra args (`"$@"`).
 
 ## Results (2026-10-02, WSL Ubuntu, 4 vCPU, CPU backend, threads=2)
 
