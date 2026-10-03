@@ -114,7 +114,8 @@ def is_transient_quarantine(reason):
     dead PR (deleted fork) simply re-quarantines next run — self-stabilizing,
     unlike permanent merge-conflict quarantines."""
     r = reason or ""
-    return r == "fetch-failed" or r.startswith("git-timeout") or r.startswith("git-error")
+    return (r.startswith("fetch-failed") or r.startswith("git-timeout")
+            or r.startswith("git-error"))
 
 
 def gate_error_reason(exc):
@@ -550,9 +551,20 @@ class Lab:
 
     def _merge_one_inner(self, n, batch_tag):
         self.clean_tree()
-        ok, _ = self.fetch_pr(n)
+        ok, detail = self.fetch_pr(n)
         if not ok:
             return False, "fetch-failed"
+        if (detail or "").startswith("local-pr/"):
+            # Fallback ref: only trustworthy if it matches the head SHA
+            # triage recorded. Merging a stale local branch would silently
+            # gate outdated code (missing fixups); refuse and let --doctor
+            # retry the fetch on a later run instead.
+            want = next((c.get("head_full", "") for c in self.cands
+                         if c.get("number") == n), "")
+            have = self.pr_head(n)
+            if want and have and have != want:
+                return False, (f"fetch-failed: stale local pr/{n} "
+                               f"{have[:8]} != triaged {want[:8]}")
         rc, old_head = self.git("rev-parse HEAD")
         old_head = old_head.strip() if rc == 0 else ""
         rc, merge_out = self.git(f"merge --no-ff --no-edit pr/{n}")

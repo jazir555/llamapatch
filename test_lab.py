@@ -1019,5 +1019,29 @@ with tempfile.TemporaryDirectory() as td:
     rep = M.build_report(lab.state, [], [{"number": 77, "title": "t"}])
     check("report-head-col", expect[:8] in rep)
 
+# 37. stale local fallback refused; current fallback merges
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "pr/5")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "pr5")
+    _git(repo, "checkout", "master")
+    head5 = _git(repo, "rev-parse", "pr/5")[1].strip()
+    a = _mklab(repo, sd, [{"number": 5, "head_full": "0" * 40, "title": "stale"}])
+    lab = M.Lab(a)
+    ok, reason = lab.merge_one_committed(5, "batch-0")
+    check("stale-refused", not ok and (reason or "").startswith("fetch-failed: stale"),
+          str(reason))
+    check("stale-transient", M.is_transient_quarantine(reason))
+    a2 = _mklab(repo, sd, [{"number": 5, "head_full": head5, "title": "cur"}])
+    lab2 = M.Lab(a2)
+    ok2, reason2 = lab2.merge_one_committed(5, "batch-0")
+    check("current-fallback-merges", ok2, str(reason2))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
