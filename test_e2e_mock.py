@@ -166,6 +166,12 @@ with tempfile.TemporaryDirectory() as td:
           and any(q["pr"] == 104 and q["reason"] == "fetch-failed" for q in lab.quar),
           str(lab.quar))
     check("run-batches", lab.state["batches_done"] == 2, str(lab.state["batches_done"]))
+    # every kept merge records the exact head SHA that was gated.
+    h101 = git(repo, "rev-parse", "pr/101")[1].strip()
+    h103 = git(repo, "rev-parse", "pr/103")[1].strip()
+    check("run-heads",
+          lab.state.get("merged_heads", {}) == {"101": h101, "103": h103},
+          str(lab.state.get("merged_heads")))
     # post-run final gate ran on the merged tree (stubs green -> clean)
     check("run-final-verify",
           '"final-verify"' in open(lab.log_f).read()

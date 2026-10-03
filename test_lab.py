@@ -994,5 +994,30 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         M.sh = _orig_sh
 
+# 36. tested head SHAs recorded per merge (forensics for stale fallbacks)
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "pr/77")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "pr77")
+    _git(repo, "checkout", "master")
+    a = _mklab(repo, sd, [{"number": 77}])
+    lab = M.Lab(a)
+    expect = _git(repo, "rev-parse", "pr/77")[1].strip()
+    check("pr-head", lab.pr_head(77) == expect and len(expect) == 40, expect[:8])
+    check("pr-head-missing", lab.pr_head(999) == "")
+    lab.record_merged(77)
+    lab.record_merged(77)
+    check("recorded-head",
+          lab.state["merged_heads"].get("77") == expect, str(lab.state["merged_heads"]))
+    check("recorded-once", lab.state["merged"] == [77], str(lab.state["merged"]))
+    rep = M.build_report(lab.state, [], [{"number": 77, "title": "t"}])
+    check("report-head-col", expect[:8] in rep)
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

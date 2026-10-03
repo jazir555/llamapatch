@@ -192,14 +192,16 @@ def build_report(state, quar, cands):
     if not merged:
         L.append("(none yet)")
     else:
-        L.append("| PR | title | area | backends | verdict | tg vs base |")
-        L.append("|---|---|---|---|---|---|")
+        L.append("| PR | title | area | backends | verdict | tg vs base | head |")
+        L.append("|---|---|---|---|---|---|---|")
+        heads = state.get("merged_heads", {}) if isinstance(state.get("merged_heads"), dict) else {}
         for n in merged:
             b = bench.get(str(n), {}) if isinstance(bench, dict) else {}
             L.append(f"| #{n} | {(titles.get(n, '') or '')[:60]} | {b.get('area', '?')} | "
                      f"{','.join(b.get('backends', []) or []) or '-'} | "
                      f"{b.get('verdict', 'unverified')} | "
-                     f"{b.get('tg', '-')} vs {b.get('base', '-')} |")
+                     f"{b.get('tg', '-')} vs {b.get('base', '-')} | "
+                     f"{str(heads.get(str(n), ''))[:8] or '-'} |")
     L.append("")
     L.append("## quarantined")
     if not quar:
@@ -501,6 +503,24 @@ class Lab:
             return []
         return [l.strip() for l in out.strip().splitlines() if l.strip()]
 
+    def pr_head(self, n):
+        """SHA of the tested PR head ref. Recorded per merge so forensics
+        (and future freshness checks) know exactly what was gated — a local
+        fallback ref after a failed fetch may lag the upstream head."""
+        rc, out = self.git(f"rev-parse pr/{n}")
+        return out.strip() if rc == 0 and out.strip() else ""
+
+    def record_merged(self, n):
+        """Record a kept merge: list membership, tested head SHA, batch
+        accounting. Single choke point so no merged path forgets the SHA."""
+        if n not in self.state["merged"]:
+            self.state["merged"].append(n)
+        sha = self.pr_head(n)
+        if sha:
+            self.state.setdefault("merged_heads", {})[str(n)] = sha
+        self.state["batches_done"] += 1
+        self.save()
+
     def merge_one_committed(self, n, batch_tag):
         """Fetch + merge + amend-message a single PR. Returns (ok, reason).
 
@@ -640,9 +660,7 @@ class Lab:
             except Exception as e:
                 self.log(event="bench-failed", pr=n,
                          detail=f"bench-{gate_error_reason(e)}: {str(e)[-800:]}")
-                self.state["merged"].append(n)
-                self.state["batches_done"] += 1
-                self.save()
+                self.record_merged(n)
                 self.log(event="merged-unverified-perf", pr=n,
                          total=len(self.state["merged"]))
                 return True
@@ -651,9 +669,7 @@ class Lab:
                          detail=bout[-1000:])
                 # bench infra flake (OOM/timeout/parse): do NOT punish
                 # the PR, but record the merge without a perf verdict.
-                self.state["merged"].append(n)
-                self.state["batches_done"] += 1
-                self.save()
+                self.record_merged(n)
                 self.log(event="merged-unverified-perf", pr=n,
                          total=len(self.state["merged"]))
                 return True
@@ -692,9 +708,7 @@ class Lab:
                 self.log(event="parity", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"),
                          expects_gain=intent.get("expects_bench_gain"))
-        self.state["merged"].append(n)
-        self.state["batches_done"] += 1
-        self.save()
+        self.record_merged(n)
         self.log(event="merged", pr=n, total=len(self.state["merged"]),
                  area=intent.get("area"), backends=intent.get("backends"))
         return True
@@ -982,9 +996,7 @@ class Lab:
                 batch_files |= files
                 if reason == "noop-empty":
                     # Already upstream: record without bench-gating a no-op.
-                    self.state["merged"].append(n)
-                    self.state["batches_done"] += 1
-                    self.save()
+                    self.record_merged(n)
                     self.log(event="merged-noop-empty", pr=n,
                              total=len(self.state["merged"]))
                     done += 1

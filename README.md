@@ -89,8 +89,8 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 197 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout
-python3 test_e2e_mock.py  # 34 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry
+python3 test_lab.py   # 202 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost/defer/late/gittimeout/heads
+python3 test_e2e_mock.py  # 35 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry + head-shas
 ```
 
 ## Evidence report (review after every 10-batch)
