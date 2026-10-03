@@ -1871,6 +1871,57 @@ with tempfile.TemporaryDirectory() as td:
           any(q["pr"] == 71 and q["reason"] == "late-build-failed" for q in lab.quar),
           str(lab.quar))
 
+# 59. triage works against any upstream slug (generic patch manager)
+check("api-base", F.api_base("acme/widgets") == "https://api.github.com/repos/acme/widgets")
+check("api-default", F.API == F.api_base(F.DEFAULT_REPO)
+      and F.DEFAULT_REPO == "ggml-org/llama.cpp")
+check("slug-ok", F.check_slug("ggml-org/llama.cpp") and F.check_slug("a/b-c_d.e"))
+check("slug-bad", not F.check_slug("") and not F.check_slug("noslash")
+      and not F.check_slug("a/b/c") and not F.check_slug(None))
+_cfg59 = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "config.json")))
+check("config-repo", _cfg59.get("repo") == "ggml-org/llama.cpp", str(_cfg59.get("repo")))
+_argv59, _req59, _sleep59 = sys.argv, F.req, F.time.sleep
+F.time.sleep = lambda s: None
+try:
+    with tempfile.TemporaryDirectory() as td59:
+        _out59 = os.path.join(td59, "c.json")
+        _seen59 = []
+        def _slugged59(url, token, timeout=60):
+            _seen59.append(url)
+            if "state=open" in url:
+                return ([{"number": 41, "title": "fix widget", "body": "",
+                          "user": {"login": "u"},
+                          "updated_at": "2026-01-01T00:00:00Z",
+                          "labels": [], "draft": False,
+                          "head": {"sha": "f" * 40}}], None)
+            if url.endswith("/files?per_page=100"):
+                return ([], None)
+            return ({"mergeable": True, "mergeable_state": "clean",
+                     "additions": 1, "deletions": 1, "changed_files": 1,
+                     "head": {"sha": "f" * 40}}, None)
+        sys.argv = ["fetch_prs.py", "--limit", "5", "--top", "1",
+                    "--out", _out59, "--ci-sleep", "0",
+                    "--repo", "acme/widgets"]
+        F.req = _slugged59
+        F.main()
+        check("slug-urls",
+              _seen59 and all(u.startswith("https://api.github.com/repos/acme/widgets/")
+                              for u in _seen59), str(_seen59))
+        _got59 = json.load(open(_out59))
+        check("slug-output", [c["number"] for c in _got59] == [41],
+              str(_got59))
+    sys.argv = ["fetch_prs.py", "--limit", "5", "--top", "1",
+                "--out", os.path.join(tempfile.gettempdir(), "nope.json"),
+                "--repo", "bogus"]
+    try:
+        F.main()
+        check("slug-bad-exits", False, "must sys.exit(2)")
+    except SystemExit as e:
+        check("slug-bad-exits", e.code == 2, f"exit={e.code}")
+finally:
+    sys.argv, F.req, F.time.sleep = _argv59, _req59, _sleep59
+
 # 54. preflight refuses to burn a campaign on a missing smoke model
 with tempfile.TemporaryDirectory() as td:
     repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")

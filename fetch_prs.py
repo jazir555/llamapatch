@@ -20,6 +20,20 @@ except ImportError:  # pragma: no cover
                 "verifiable_on_cpu": False, "reason": "pr_intent missing"}
 
 API = "https://api.github.com/repos/ggml-org/llama.cpp"
+DEFAULT_REPO = "ggml-org/llama.cpp"
+
+
+def api_base(slug):
+    """API root for any `owner/name` slug. Triage is repo-agnostic: PR
+    listing, detail, files, and commit status endpoints share this shape
+    on every GitHub repo, so the patch manager works against whichever
+    upstream the operator points it at (llama.cpp today, whatever grows
+    tomorrow)."""
+    return f"https://api.github.com/repos/{slug}"
+
+
+def check_slug(slug):
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug or ""))
 
 def req(url, token, timeout=60):
     h = {"Accept": "application/vnd.github+json", "User-Agent": "llama-pr-lab"}
@@ -86,10 +100,10 @@ def touches_perf(paths, cfg):
                 return True
     return False
 
-def fetch_ci_state(head_sha, token):
+def fetch_ci_state(head_sha, token, api=API):
     """Combined commit status for a PR head. Returns (state, total)."""
     try:
-        data, _ = req(f"{API}/commits/{head_sha}/status", token)
+        data, _ = req(f"{api}/commits/{head_sha}/status", token)
         return data.get("state"), len(data.get("statuses", []))
     except Exception as e:
         return f"error:{e}"[:120], 0
@@ -127,6 +141,8 @@ def main():
     ap.add_argument("--top", type=int, default=100, help="how many go to stage-2 detail fetch")
     ap.add_argument("--out", default="candidates.json")
     ap.add_argument("--config", default="config.json")
+    ap.add_argument("--repo", default=None,
+                    help="upstream slug owner/name (default: config repo, else ggml-org/llama.cpp)")
     ap.add_argument("--include-ci", action="store_true",
                     help="fetch combined commit status per top-PR (extra API calls)")
     ap.add_argument("--ci-sleep", type=float, default=0.7)
@@ -134,9 +150,15 @@ def main():
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     with open(os.path.join(os.path.dirname(__file__), a.config)) as f:
         cfg = json.load(f)
+    slug = a.repo or cfg.get("repo") or DEFAULT_REPO
+    if not check_slug(slug):
+        print(f"bad --repo slug {slug!r}: want owner/name", file=sys.stderr)
+        sys.exit(2)
+    api = api_base(slug)
+    print(f"triage upstream: {slug}", flush=True)
 
     def _one(page):
-        url = f"{API}/pulls?state=open&per_page=100&page={page}"
+        url = f"{api}/pulls?state=open&per_page=100&page={page}"
         data, _ = req(url, token)
         print(f"page {page}: got {len(data or [])}", flush=True)
         if len(data or []) < 100:
@@ -189,13 +211,13 @@ def main():
     for i, c in enumerate(top):
         n = c["number"]
         try:
-            detail, _ = req(f"{API}/pulls/{n}", token)
+            detail, _ = req(f"{api}/pulls/{n}", token)
             c["mergeable"] = detail.get("mergeable")
             c["mergeable_state"] = detail.get("mergeable_state")
             c["additions"] = detail.get("additions"); c["deletions"] = detail.get("deletions")
             c["changed_files"] = detail.get("changed_files")
             c["head_full"] = detail.get("head", {}).get("sha", "")
-            files, _ = req(f"{API}/pulls/{n}/files?per_page=100", token)
+            files, _ = req(f"{api}/pulls/{n}/files?per_page=100", token)
             paths = [f["filename"] for f in files]
             c["files"] = paths[:20]
             c["touches_perf_path"] = touches_perf(paths, cfg)
@@ -210,7 +232,7 @@ def main():
                 c["score"] -= 1
                 c["hits"] = c["hits"] + ["dirty-penalty"]
             if a.include_ci and c.get("head_full"):
-                ci_state, ci_n = fetch_ci_state(c["head_full"], token)
+                ci_state, ci_n = fetch_ci_state(c["head_full"], token, api)
                 c["ci_state"] = ci_state
                 c["ci_count"] = ci_n
                 if ci_state in ("failure", "error"):

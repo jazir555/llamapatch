@@ -1,5 +1,6 @@
 {
   "repo_url": "https://github.com/ggml-org/llama.cpp.git",
+  "repo": "ggml-org/llama.cpp",
   "wsl_lab_dir": "~/llama-pr-lab/llama.cpp",
   "wsl_model_dir": "~/llama-pr-lab/models",
   "smoke_model": {
