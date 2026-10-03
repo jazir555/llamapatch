@@ -146,7 +146,8 @@ def acquire_lock(state_dir):
     except FileExistsError:
         raise RuntimeError(
             f"lab lock exists: {lp} — another run may be active; "
-            f"remove it only after verifying no merge loop is running")
+            f"remove it only after verifying no merge loop is running "
+            f"(or re-run with --force-unlock once verified)")
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps({"pid": os.getpid(),
                             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat()}))
@@ -325,11 +326,17 @@ class Lab:
         return r.returncode, (r.stdout or "")[-8000:]
 
     def ensure_identity(self):
+        # Email and name checked independently: the old joint check set
+        # BOTH whenever email was missing, and set NEITHER when only the
+        # name was missing. Never clobbers a configured value.
         rc, out = self.git("config user.email")
         if rc != 0 or not out.strip():
-            self.git("config user.email 'pr-lab@localhost'")
-            self.git("config user.name 'pr-lab'")
-            self.log(event="git-identity-set")
+            self.git_args(["config", "user.email", "pr-lab@localhost"])
+            self.log(event="git-identity-set", field="email")
+        rc, out = self.git("config user.name")
+        if rc != 0 or not out.strip():
+            self.git_args(["config", "user.name", "pr-lab"])
+            self.log(event="git-identity-set", field="name")
 
     def clean_tree(self):
         # abort any in-progress merge/rebase, leave branch head intact

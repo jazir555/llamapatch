@@ -1331,5 +1331,51 @@ check("triage-forwards-flags",
 check("dispatcher-forwards-flags",
       _dispatcher45.count('"$@"') >= 3, "merge/dry/doctor/report forward flags")
 
+# 46. lifecycle details: lock names the hatch, identity never clobbers
+with tempfile.TemporaryDirectory() as td:
+    M.acquire_lock(td)
+    try:
+        M.acquire_lock(td)
+        check("lock-names-hatch", False, "second acquire must raise")
+    except RuntimeError as e:
+        check("lock-names-hatch", "--force-unlock" in str(e)
+              and "another run may be active" in str(e), str(e)[:200])
+    finally:
+        M.release_lock(td)
+
+with tempfile.TemporaryDirectory() as td:
+    # Isolate from the operator's global git identity: HOME/USERPROFILE
+    # redirect + NOSYSTEM so effective config starts empty.
+    home = os.path.join(td, "home"); os.makedirs(home)
+    saved = {k: os.environ.get(k) for k in
+             ("HOME", "USERPROFILE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")}
+    os.environ["HOME"] = home; os.environ["USERPROFILE"] = home
+    os.environ.pop("GIT_CONFIG_GLOBAL", None)
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    try:
+        repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+        os.makedirs(repo); os.makedirs(sd)
+        _git(repo, "init", "-b", "master")
+        _git(repo, "config", "user.email", "mine@example.com")
+        a = _mklab(repo, sd, [{"number": 1}])
+        lab = M.Lab(a)
+        lab.ensure_identity()
+        check("identity-keeps-email",
+              _git(repo, "config", "user.email")[1].strip() == "mine@example.com")
+        check("identity-fills-name",
+              _git(repo, "config", "user.name")[1].strip() == "pr-lab")
+        _git(repo, "config", "--unset", "user.email")
+        _git(repo, "config", "--unset", "user.name")
+        lab.ensure_identity()
+        check("identity-fills-both",
+              _git(repo, "config", "user.email")[1].strip() == "pr-lab@localhost"
+              and _git(repo, "config", "user.name")[1].strip() == "pr-lab")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)
