@@ -82,40 +82,44 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 .row{margin:.5em 0}button{margin-right:.5em}
 </style></head><body>
 <h1>llamapatch manager</h1>
+<div class="row" id="err" style="color:#a00"></div>
 <div class="row"><label>Upstream slug <input id="slug" type="text" value="ggml-org/llama.cpp"></label></div>
 <div class="row"><label>Checkout (repo) <input id="repo" type="text" placeholder="/home/user/llama-pr-lab/llama.cpp"></label>
 <label>Base <input id="base" type="text" value="master" style="width:8em" list="refs"></label>
-<datalist id="refs"></datalist><button onclick="versions()">Versions</button></div>
+<datalist id="refs"></datalist><button onclick="safe(versions)">Versions</button></div>
 <div class="row"><label>Candidates file <input id="cands" type="text" value="candidates-1k.json"></label>
 <label>State dir <input id="statedir" type="text" value="" placeholder="(default: alongside candidates)"></label>
-<button onclick="load()">Load</button></div>
+<button onclick="safe(load)">Load</button></div>
 <div class="row"><label>Limit <input id="limit" type="text" value="200" style="width:5em"></label>
 <label>Top <input id="top" type="text" value="50" style="width:5em"></label>
 <label>Out <input id="out" type="text" value="candidates.json"></label>
 <label><input id="ci" type="checkbox"> include CI</label>
-<button onclick="triage()">Triage</button></div>
+<button onclick="safe(triage)">Triage</button></div>
 <div class="row"><label>Clone URL <input id="cloneurl" type="text" placeholder="https://github.com/ggml-org/llama.cpp.git"></label>
 <label>Dest <input id="clonedest" type="text" placeholder="/home/user/llama-pr-lab/llama.cpp"></label>
-<button onclick="setup()">Setup checkout</button></div>
+<button onclick="safe(setup)">Setup checkout</button></div>
 <div class="row"><button onclick="checkAll(true)">All</button><button onclick="checkAll(false)">None</button>
 <label>Batch <input id="batch" type="text" value="10" style="width:4em"></label>
 <label>Max PRs <input id="maxprs" type="text" value="50" style="width:4em"></label>
-<button onclick="merge(false)">Merge selected</button><button onclick="merge(true)">Dry run</button>
-<button onclick="cancel()">Cancel run</button><button onclick="doctor()">Doctor</button><button onclick="report()">Report</button></div>
+<button id="mbtn" onclick="safe(()=>merge(false))">Merge selected</button><button id="dbtn" onclick="safe(()=>merge(true))">Dry run</button>
+<button onclick="safe(cancel)">Cancel run</button><button onclick="safe(doctor)">Doctor</button><button onclick="safe(report)">Report</button></div>
 <div class="row"><label>Smoke model <input id="smokemodel" type="text" placeholder="(default path)"></label>
 <label>Bench model <input id="benchmodel" type="text" placeholder="(default path)"></label></div>
 <div class="row"><label>Filter <input id="flt" type="text" placeholder="text…" oninput="render()"></label>
 <label>Status <select id="fltstatus" onchange="render()"><option value="">all</option><option>pending</option><option>merged</option><option>quarantined</option></select></label></div>
 <table><thead><tr><th></th><th><a href="#" onclick="return sort('number')">PR</a></th><th><a href="#" onclick="return sort('title')">title</a></th><th><a href="#" onclick="return sort('score')">score</a></th><th>area</th><th>files</th><th>CI</th><th>verdict</th><th><a href="#" onclick="return sort('status')">status</a></th></tr></thead>
 <tbody id="rows"></tbody></table>
-<h2>Runs</h2><div class="row"><button onclick="runs()">Refresh</button></div><pre id="runs">(no runs)</pre>
+<h2>Runs</h2><div class="row"><button onclick="safe(runs)">Refresh</button></div><pre id="runs">(no runs)</pre>
 <h2>Log <span id="runid"></span></h2><pre id="log">(no run)</pre>
 <h2>Report</h2><pre id="rep">(no report)</pre>
 <script>
-let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1;
+let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1, PENDINGOUT=null;
+function err(m){document.getElementById('err').textContent=m||''}
+function busy(v){document.getElementById('mbtn').disabled=v;document.getElementById('dbtn').disabled=v}
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
+async function safe(fn){try{err('');await fn()}catch(e){err('Error: '+e.message)}}
 async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();ROWS=d.candidates;render()}
-function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number} <button onclick="preview(${c.number})" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.quar_reason?` (${esc(c.quar_reason)})`:''}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
+function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number} <button onclick="safe(()=>preview(${c.number}))" title="diff vs base">diff</button></td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.ci||''}</td><td>${c.verdict||''}</td><td>${c.status}${c.quar_reason?` (${esc(c.quar_reason)})`:''}${c.status==='quarantined'?` <button onclick="safe(()=>release([${c.number}]))">release</button>`:''}</td>`;tb.appendChild(tr)}}
 async function preview(n){const b={repo:val('repo'),base:val('base')||'master',number:n};const d=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('rep').textContent=`#${n} vs ${d.base}\n${d.stat}\n---\n${d.diff}`}
 async function release(ns){const b={candidates:val('cands'),state_dir:val('statedir'),numbers:ns};const r=await api('/api/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load()}
 async function doctor(){const b={candidates:val('cands'),repo:val('repo'),state_dir:val('statedir')};const r=await api('/api/doctor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
@@ -132,13 +136,13 @@ function val(id){return document.getElementById(id).value.trim()}
 function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
 function checkAll(v){document.querySelectorAll('#rows input[type=checkbox]:not(:disabled)').forEach(c=>c.checked=v);saveChecks()}
 function selected(){return [...document.querySelectorAll('#rows input[type=checkbox]:checked')].map(c=>+c.dataset.n)}
-async function triage(){const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:val('out')||'candidates.json',include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
+async function triage(){const out=val('out')||'candidates.json';const b={slug:val('slug'),limit:+val('limit')||200,top:+val('top')||50,out:out,include_ci:document.getElementById('ci').checked};const r=await api('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});PENDINGOUT=out;watch(r.id)}
 async function setup(){const b={url:val('cloneurl'),dest:val('clonedest'),base:val('base')||'master'};const r=await api('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 async function merge(dry){saveChecks();const b={candidates:val('cands'),repo:val('repo'),base:val('base')||'master',state_dir:val('statedir'),numbers:selected(),batch:+val('batch')||10,max_prs:+val('maxprs')||50,smoke_model:val('smokemodel'),bench_model:val('benchmodel'),dry_run:dry};const r=await api('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id);load()}
 async function report(){const q=new URLSearchParams({candidates:val('cands'),state_dir:val('statedir')});const r=await fetch('/api/report?'+q);document.getElementById('rep').textContent=await r.text()}
 async function cancel(){if(RUN==null)return;const d=await api('/api/runs/'+RUN+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await poll()}
-function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;clearInterval(TIMER);TIMER=setInterval(poll,1000);poll()}
-async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);load();report()}}
+function watch(id){RUN=id;document.getElementById('runid').textContent='run '+id;busy(true);clearInterval(TIMER);TIMER=setInterval(()=>poll().catch(e=>err('Error: '+e.message)),1000);poll().catch(e=>err('Error: '+e.message))}
+async function poll(){if(RUN==null)return;const d=await api('/api/runs/'+RUN);document.getElementById('log').textContent=d.log_tail||'(running…)';if(d.status!=='running'){clearInterval(TIMER);busy(false);if(PENDINGOUT){document.getElementById('cands').value=PENDINGOUT;PENDINGOUT=null;await load()}else{await load()}await report()}}
 </script></body></html>
 """
 
@@ -447,6 +451,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             n = 0
         if n > limit:
+            # Drain (bounded) before refusing: closing with an unread body
+            # resets the connection mid-flight and the client sees RST
+            # instead of the 413. 8MB of discard keeps memory flat.
+            left = min(n, 8 << 20)
+            try:
+                while left > 0:
+                    chunk = self.rfile.read(min(65536, left))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+            except Exception:
+                pass
             return "too-large"
         raw = self.rfile.read(n) if n > 0 else b""
         try:

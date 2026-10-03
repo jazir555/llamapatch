@@ -137,7 +137,10 @@ killed run — never another run's. Triage (`--repo owner/name`, any
 upstream) and sparse setup run from the same page (bash paths translated
 to /mnt/ drive spelling automatically under WSL's bash). Rows carry quarantine
 reasons for release decisions; triage offers an include-CI toggle. Stdlib
-only, no dependencies; refuses non-loopback bind addresses.
+only, no dependencies; refuses non-loopback bind addresses, caps request bodies at 1MB, and
+surfaces handler errors inline instead of silent console failures
+(merge buttons lock while a run is active; triage auto-loads its output
+and refreshes the report on completion).
 
 ## Gate timeouts (hung builds never kill a batch)
 
