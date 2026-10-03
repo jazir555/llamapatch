@@ -228,5 +228,56 @@ with tempfile.TemporaryDirectory() as td:
     check("strict-baseline", lab.state["bench_baseline"] == 40.0,
           str(lab.state.get("bench_baseline")))
 
+# Scenario 4: CI-red skip is retryable, not terminal. PR 301 is red in run
+# 1 (skipped pre-build, never quarantined); after the author fixes CI and
+# fresh triage flips it green, run 2 merges it. PR 302 merges in run 1.
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo")
+    statedir = os.path.join(td, "state")
+    os.makedirs(repo); os.makedirs(statedir)
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.email", "t@t")
+    git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "a.txt"), "w").write("v1\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+    git(repo, "checkout", "-b", "pr/302")
+    open(os.path.join(repo, "b.txt"), "w").write("hello\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "pr302")
+    git(repo, "checkout", "master")
+
+    def _runlab(cands):
+        lb = make_lab(repo, statedir, cands)
+        lb.a.batch = 10; lb.a.max_prs = 10
+        lb.a.bench_model = ""
+        lb.a.regression_pct = 0
+        lb.build = lambda: (True, "mock build ok")
+        lb.smoke = lambda: (True, "tg32 : 40 t/s mock")
+        lb.run()
+        return lb
+
+    # run 1: 301 red -> skipped without quarantine; 302 merges.
+    lab = _runlab([{"number": 301, "title": "red", "ci_state": "failure"},
+                   {"number": 302, "title": "green"}])
+    check("ci-skip-merges-green", lab.state["merged"] == [302],
+          str(lab.state["merged"]))
+    check("ci-skip-no-quarantine", lab.state["quarantined"] == []
+          and lab.quar == [], f"{lab.state['quarantined']} {lab.quar}")
+    check("ci-skip-logged", '"ci-red-skipped"' in open(lab.log_f).read())
+    check("ci-skip-stays-pending", 301 not in lab.state["merged"]
+          and 301 not in lab.state["quarantined"])
+
+    # author fixes CI; new branch appears (pushed fix). Fresh triage sees
+    # green 301, run 2 merges it.
+    git(repo, "checkout", "-b", "pr/301", "master")
+    open(os.path.join(repo, "c.txt"), "w").write("fixed\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "pr301")
+    git(repo, "checkout", lab.state["branch"])
+    lab2 = _runlab([{"number": 301, "title": "red", "ci_state": "success"},
+                    {"number": 302, "title": "green"}])
+    check("ci-flip-retried", lab2.state["merged"] == [302, 301],
+          str(lab2.state["merged"]))
+    check("ci-flip-clean", lab2.state["quarantined"] == [],
+          str(lab2.state["quarantined"]))
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

@@ -33,11 +33,14 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
    baseline is pinned to the base SHA (`bench_baseline_sha`) and rebuilds
    automatically after any rebase/base move, so verdicts never compare
    against a stale base.
-5. **Self-heal:** merge conflict / CI-red / build fail / smoke fail /
+5. **Self-heal:** merge conflict / build fail / smoke fail /
    perplexity fail / regression / no-improvement / empty (already-upstream)
-   noop all quarantine or record the culprit(s) and continue. Transient
-   fetch/git failures quarantine as `fetch-failed`/`git-timeout` (never as
-   conflicts) and `--doctor` requeues them for retry — a dead fork simply
+   noop all quarantine or record the culprit(s) and continue. CI-red PRs are
+   **skipped, never quarantined** — CI flips green on reruns/pushes, so the
+   next triage refresh retries them automatically (`--doctor` also releases
+   old `ci-red-skipped` entries). Transient fetch/git
+   failures quarantine as `fetch-failed`/`git-timeout` (never as conflicts)
+   and `--doctor` requeues them for retry — a dead fork simply
    re-quarantines next run. After the loop, a **final post-run gate**
    re-verifies the merged tree (interactions can regress after individual
    gates pass) and walks back culprits as `late-*`, then **re-verifies that
@@ -84,7 +87,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 Self-test (no network, no models, runs on Windows):
 ```bash
 python3 test_lab.py   # 190 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement/ghost
-python3 test_e2e_mock.py  # 28 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement
+python3 test_e2e_mock.py  # 34 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry + strict-no-improvement + ci-flip-retry
 ```
 
 ## Evidence report (review after every 10-batch)

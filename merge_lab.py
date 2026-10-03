@@ -915,9 +915,12 @@ class Lab:
                     break
                 # CI gate: skip red PRs before paying for a build (annotated
                 # by fetch_prs.py --include-ci; override with --no-skip-ci-red).
+                # Skipped, NOT quarantined: CI flips green on reruns/pushes,
+                # and the next triage refresh updates ci_state, so the PR is
+                # retried automatically. The skip costs one dict lookup.
                 if should_skip_ci(cand_by_num.get(n), getattr(self.a, "skip_ci_red", True)):
                     ci = (cand_by_num.get(n) or {}).get("ci_state")
-                    self.quarantine(n, "ci-red-skipped", f"ci_state={ci}")
+                    self.log(event="ci-red-skipped", pr=n, ci_state=ci)
                     continue
                 intent = classify_intent(cand_by_num.get(n) or {"number": n})
                 self.log(event="pr-intent", pr=n, area=intent.get("area"),
@@ -998,6 +1001,11 @@ class Lab:
                 requeued.append(q["pr"])
             elif is_transient_quarantine(q.get("reason", "")):
                 print(f"doctor: requeue #{q['pr']} (transient {q.get('reason')}, retry next run)")
+                requeued.append(q["pr"])
+            elif q.get("reason") == "ci-red-skipped":
+                # Migration: skips no longer quarantine, so release old
+                # entries back to pending; fresh triage re-scores their CI.
+                print(f"doctor: requeue #{q['pr']} (ci-red skip is retryable)")
                 requeued.append(q["pr"])
             else:
                 fixed_quar.append(q)

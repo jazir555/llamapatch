@@ -536,10 +536,11 @@ with tempfile.TemporaryDirectory() as td:
     lab = M.Lab(a)
     lab.state["base_sha"] = _git(repo, "rev-parse", "HEAD")[1].strip()
     lab.state["merged"] = [7]
-    lab.state["quarantined"] = [5, 6, 8]
+    lab.state["quarantined"] = [5, 6, 8, 9]
     lab.quar = [{"pr": 5, "reason": "fetch-failed", "detail": "fetch-failed"},
                 {"pr": 6, "reason": "merge-conflict", "detail": "CONFLICT"},
-                {"pr": 8, "reason": "git-timeout", "detail": "git-timeout: hung"}]
+                {"pr": 8, "reason": "git-timeout", "detail": "git-timeout: hung"},
+                {"pr": 9, "reason": "ci-red-skipped", "detail": "ci_state=failure"}]
     lab.save()
     lab.doctor()
     check("doctor-drops-phantom", lab.state["merged"] == [], str(lab.state["merged"]))
