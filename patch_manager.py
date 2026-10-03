@@ -67,7 +67,7 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 <label>Batch <input id="batch" type="text" value="10" style="width:4em"></label>
 <label>Max PRs <input id="maxprs" type="text" value="50" style="width:4em"></label>
 <button onclick="merge(false)">Merge selected</button><button onclick="merge(true)">Dry run</button>
-<button onclick="cancel()">Cancel run</button><button onclick="report()">Report</button></div>
+<button onclick="cancel()">Cancel run</button><button onclick="doctor()">Doctor</button><button onclick="report()">Report</button></div>
 <div class="row"><label>Filter <input id="flt" type="text" placeholder="text…" oninput="render()"></label>
 <label>Status <select id="fltstatus" onchange="render()"><option value="">all</option><option>pending</option><option>merged</option><option>quarantined</option></select></label></div>
 <table><thead><tr><th></th><th><a href="#" onclick="return sort('number')">PR</a></th><th><a href="#" onclick="return sort('title')">title</a></th><th><a href="#" onclick="return sort('score')">score</a></th><th>area</th><th>files</th><th>verdict</th><th><a href="#" onclick="return sort('status')">status</a></th></tr></thead>
@@ -79,7 +79,9 @@ input[type=text]{width:26em;max-width:90%}pre{background:#111;color:#eee;padding
 let RUN=null, TIMER=null, ROWS=[], SORTK='number', SORTD=1;
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error((j&&j.error)||t.slice(0,300));return j}
 async function load(){const q=new URLSearchParams({file:val('cands'),state_dir:val('statedir')});const d=await api('/api/candidates?'+q);saveFields();ROWS=d.candidates;render()}
-function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number}</td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.verdict||''}</td><td>${c.status}</td>`;tb.appendChild(tr)}}
+function render(){const tb=document.getElementById('rows');tb.innerHTML='';const keep=savedChecks();const f=(val('flt')||'').toLowerCase(),fs=val('fltstatus');const rows=ROWS.filter(c=>(!fs||c.status===fs)&&(!f||((c.title||'')+' '+(c.area||'')+' #'+c.number).toLowerCase().includes(f)));rows.sort((a,b)=>{const x=a[SORTK]??'',y=b[SORTK]??'';return (x<y?-1:x>y?1:0)*SORTD});for(const c of rows){const tr=document.createElement('tr');if(c.status!=='pending')tr.className=c.status;const files=(c.files||[]).join(', ')+(c.file_count>(c.files||[]).length?` +${c.file_count-(c.files||[]).length} more`:'');const checked=c.status==='pending'&&(keep===null||keep.has(c.number));tr.innerHTML=`<td><input type="checkbox" data-n="${c.number}" ${checked?'checked':''} ${c.status!=='pending'?'disabled':''} onchange="saveChecks()"></td><td>#${c.number}</td><td>${esc(c.title||'')}<br><small>${esc(c.head||'')}</small></td><td>${c.score??''}</td><td title="${esc(c.intent_reason||'')}">${c.area||''}</td><td><small>${esc(files)}</small></td><td>${c.verdict||''}</td><td>${c.status}${c.status==='quarantined'?` <button onclick="release([${c.number}])">release</button>`:''}</td>`;tb.appendChild(tr)}}
+async function release(ns){const b={candidates:val('cands'),state_dir:val('statedir'),numbers:ns};const r=await api('/api/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load()}
+async function doctor(){const b={candidates:val('cands'),repo:val('repo'),state_dir:val('statedir')};const r=await api('/api/doctor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});watch(r.id)}
 function sort(k){if(SORTK===k)SORTD*=-1;else{SORTK=k;SORTD=1}render();return false}
 async function runs(){const d=await api('/api/runs');document.getElementById('runs').textContent=d.runs.length?d.runs.map(r=>`#${r.id} ${r.kind} ${r.status}${r.rc==null?'':' rc='+r.rc}`).join(String.fromCharCode(10)):'(no runs)'}
 async function versions(){const q=new URLSearchParams({repo:val('repo')});const d=await api('/api/refs?'+q);const dl=document.getElementById('refs');dl.innerHTML='';for(const b of [...(d.branches||[]),...(d.tags||[])]){const o=document.createElement('option');o.value=b;dl.appendChild(o)}}
@@ -485,6 +487,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return _json(self, 200, {"id": rid})
         if self.path == "/api/merge":
             return self._merge(body)
+        if self.path == "/api/release":
+            return self._release(body)
+        if self.path == "/api/doctor":
+            return self._doctor(body)
         if self.path.startswith("/api/runs/") and self.path.endswith("/cancel"):
             try:
                 rid = int(self.path.split("/")[3])
@@ -542,6 +548,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cmd.append("--dry-run")
         rid = self._spawn("merge", cmd, None, state_dir=sd)
         return _json(self, 200, {"id": rid, "selected": os.path.basename(sel_path)})
+
+    def _release(self, body):
+        """Release quarantined PRs back to pending (retry after upstream
+        fixes, rebases, or CI flips). Removes membership + detail rows
+        with quarantine-file-first atomic ordering, like Lab.save."""
+        if _M is None:
+            return _json(self, 500, {"error": "merge_lab unavailable"})
+        cands, err = self.app.load_candidates(body.get("candidates", ""))
+        if err:
+            return _json(self, 404 if "not found" in err else 422,
+                         {"error": err})
+        nums = body.get("numbers", [])
+        if not nums or not isinstance(nums, list) or \
+                any(not isinstance(n, int) for n in nums):
+            return _json(self, 400, {"error": "numbers must be non-empty int list"})
+        sd = (body.get("state_dir") or "").strip() or self.app.default_state_dir(
+            body.get("candidates", ""))
+        state, quar, _, _ = self.app.load_state(sd)
+        qset = set(state.get("quarantined", []) or [])
+        hit = [n for n in nums if n in qset]
+        if not hit:
+            return _json(self, 400, {"error": "none of the selected PRs are quarantined"})
+        state["quarantined"] = [n for n in qset if n not in set(hit)]
+        quar = [q for q in quar
+                if not (isinstance(q, dict) and q.get("pr") in set(hit))]
+        os.makedirs(sd, exist_ok=True)
+        _M.atomic_write_json(os.path.join(sd, "quarantined.json"), quar)
+        _M.atomic_write_json(os.path.join(sd, "lab-state.json"), state)
+        return _json(self, 200, {"released": hit})
+
+    def _doctor(self, body):
+        """Run merge_lab --doctor as a tracked run (reconcile + requeue)."""
+        repo = (body.get("repo") or "").strip()
+        if not repo:
+            return _json(self, 400, {"error": "repo checkout path required"})
+        cands, err = self.app.load_candidates(body.get("candidates", ""))
+        if err:
+            return _json(self, 404 if "not found" in err else 422,
+                         {"error": err})
+        sd = (body.get("state_dir") or "").strip() or self.app.default_state_dir(
+            body.get("candidates", ""))
+        os.makedirs(sd, exist_ok=True)
+        cmd = [sys.executable, "-u", os.path.join(HERE, "merge_lab.py"),
+               "--candidates", os.path.abspath(body.get("candidates", "")),
+               "--repo", repo, "--state-dir", sd, "--doctor"]
+        rid = self._spawn("doctor", cmd, None, state_dir=sd)
+        return _json(self, 200, {"id": rid})
 
 
 def serve(host="127.0.0.1", port=8123):

@@ -194,7 +194,8 @@ def build_report(state, quar, cands):
          f"",
          f"- merged: {len(merged)} | quarantined: {len(state.get('quarantined', []) or [])} | "
          f"pending: {pending_n} | batches: {state.get('batches_done', 0)} | "
-         f"baseline tg: {base} @ {base_sha}{base_runs_s}",
+         f"baseline tg: {base} @ {base_sha}{base_runs_s}" +
+         (f" | branch: {state.get('branch')}" if state.get("branch") else ""),
          f""]
     late = []
     for q in quar:
@@ -300,6 +301,12 @@ class Lab:
                 except Exception:
                     pass
                 print(f"state corrupt, backed up to {bak}: {e}", flush=True)
+        # Backfill: state files from older versions (or hand-written ones,
+        # like the GUI writes) may lack keys the loop indexes directly.
+        for _k, _v in (("base_sha", None), ("branch", None), ("merged", []),
+                       ("quarantined", []), ("bench_baseline", None),
+                       ("batches_done", 0)):
+            self.state.setdefault(_k, _v)
         if os.path.exists(self.quar_f):
             try:
                 with open(self.quar_f) as f:

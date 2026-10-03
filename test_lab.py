@@ -2169,6 +2169,60 @@ if _node63:
 else:
     check("gui-js-parses", True, "node absent, skipped")
 
+# 64. release quarantined PRs, GUI doctor run, branch in report header
+with tempfile.TemporaryDirectory() as td64:
+    cf64 = os.path.join(td64, "c.json")
+    json.dump([{"number": 5, "title": "a"}, {"number": 6, "title": "b"}],
+              open(cf64, "w"))
+    sd64 = os.path.join(td64, "st"); os.makedirs(sd64)
+    json.dump({"merged": [], "quarantined": [5, 6]}, open(os.path.join(sd64, "lab-state.json"), "w"))
+    json.dump([{"pr": 5, "reason": "merge-conflict", "detail": "x"},
+               {"pr": 6, "reason": "fetch-failed", "detail": "y"}],
+              open(os.path.join(sd64, "quarantined.json"), "w"))
+    st, body = _post60("/api/release", {"candidates": cf64, "state_dir": sd64,
+                                        "numbers": [5]})
+    check("gui-release", st == 200 and json.loads(body).get("released") == [5],
+          f"{st} {body[:150]}")
+    check("gui-release-state",
+          json.load(open(os.path.join(sd64, "lab-state.json")))["quarantined"] == [6]
+          and [q["pr"] for q in json.load(open(os.path.join(sd64, "quarantined.json")))] == [6])
+    st, _ = _post60("/api/release", {"candidates": cf64, "state_dir": sd64,
+                                     "numbers": [5]})
+    check("gui-release-absent", st == 400, str(st))
+    repo64 = os.path.join(td64, "repo"); os.makedirs(repo64)
+    _git(repo64, "init", "-b", "master")
+    _git(repo64, "config", "user.email", "t@t"); _git(repo64, "config", "user.name", "t")
+    open(os.path.join(repo64, "f.txt"), "w").write("v1\n")
+    _git(repo64, "add", "-A"); _git(repo64, "commit", "-m", "base")
+    st, body = _post60("/api/doctor", {"candidates": cf64, "repo": repo64,
+                                       "state_dir": sd64})
+    _did64 = json.loads(body).get("id") if st == 200 else None
+    check("gui-doctor-accepted", st == 200 and isinstance(_did64, int),
+          f"{st} {body[:150]}")
+    _ddone64, _dtail64 = False, ""
+    for _ in range(60):
+        _t60.sleep(0.5)
+        st, body = _get60(f"/api/runs/{_did64}")
+        _dr64 = json.loads(body)
+        if _dr64.get("status") != "running":
+            _ddone64 = _dr64.get("status") == "done"
+            _dtail64 = _dr64.get("log_tail", "")
+            break
+    check("gui-doctor-done", _ddone64 and "doctor:" in _dtail64, _dtail64[-250:])
+check("report-branch",
+      "branch: pr-lab/base-abc" in M.build_report({"merged": [], "branch": "pr-lab/base-abc"}, [], []))
+check("report-no-branch",
+      "branch:" not in M.build_report({"merged": []}, [], []))
+with tempfile.TemporaryDirectory() as td64b:
+    sd64b = os.path.join(td64b, "st"); os.makedirs(sd64b)
+    json.dump({"merged": [9]}, open(os.path.join(sd64b, "lab-state.json"), "w"))
+    a64b = _mklab(os.path.join(td64b, "norepo"), sd64b, [{"number": 9}])
+    _lab64b = M.Lab(a64b)
+    check("state-backfill",
+          _lab64b.state["merged"] == [9] and _lab64b.state["branch"] is None
+          and _lab64b.state["quarantined"] == []
+          and _lab64b.state["batches_done"] == 0, str(_lab64b.state))
+
 _srv60.shutdown()
 _srv60.server_close()
 
