@@ -166,6 +166,10 @@ with tempfile.TemporaryDirectory() as td:
           and any(q["pr"] == 104 and q["reason"] == "fetch-failed" for q in lab.quar),
           str(lab.quar))
     check("run-batches", lab.state["batches_done"] == 2, str(lab.state["batches_done"]))
+    # post-run final gate ran on the merged tree (stubs green -> clean)
+    check("run-final-verify",
+          '"final-verify"' in open(lab.log_f).read()
+          and '"clean"' in open(lab.log_f).read())
     # resume: second run() is a no-op (nothing pending) and stays green
     lab2 = make_lab(repo, statedir, cands)
     lab2.a.batch = 10; lab2.a.max_prs = 10

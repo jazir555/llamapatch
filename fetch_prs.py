@@ -10,7 +10,7 @@ Usage (in WSL):
 
 Output: candidates.json sorted by score desc, each with number/title/score/reasons.
 """
-import argparse, json, os, sys, time, urllib.request, urllib.error
+import argparse, json, os, re, sys, time, urllib.request, urllib.error
 
 try:
     from pr_intent import classify_intent
@@ -21,13 +21,15 @@ except ImportError:  # pragma: no cover
 
 API = "https://api.github.com/repos/ggml-org/llama.cpp"
 
-def req(url, token):
+def req(url, token, timeout=60):
     h = {"Accept": "application/vnd.github+json", "User-Agent": "llama-pr-lab"}
     if token:
         h["Authorization"] = f"Bearer {token}"
     r = urllib.request.Request(url, headers=h)
     try:
-        with urllib.request.urlopen(r) as resp:
+        # timeout: a hung connection must fail into collect_pages retry,
+        # never stall triage forever on a blocking socket.
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
             return json.load(resp), resp.headers
     except urllib.error.HTTPError as e:
         if e.code == 403 and "rate" in str(e.headers).lower():
@@ -35,9 +37,24 @@ def req(url, token):
             print(f"RATE LIMITED. Reset at {reset}. Set GH_TOKEN to raise limit.", file=sys.stderr)
         raise
 
+_KW_PATTERNS = {}
+
+def _kw_pattern(kw):
+    """Compiled matcher per keyword. Pure-alphanumeric words match on a
+    left boundary with stemming (fix matches fixed/fixes, not prefix;
+    bug matches bugs, not debug). Phrases and punctuated tokens
+    (flash attention, top-k, q4_0, add␣) keep substring matching."""
+    if kw not in _KW_PATTERNS:
+        k = kw.lower()
+        if re.fullmatch(r"[a-z0-9]+", k):
+            _KW_PATTERNS[kw] = re.compile(r"\b" + re.escape(k) + r"\w*")
+        else:
+            _KW_PATTERNS[kw] = re.compile(re.escape(k))
+    return _KW_PATTERNS[kw]
+
 def score_title(title, body, cfg):
     t = ((title or "") + " " + (body or "")).lower()
-    hits = [k for k in cfg["perf_keywords"] if k.lower() in t]
+    hits = [k for k in cfg["perf_keywords"] if _kw_pattern(k).search(t)]
     return len(hits), hits
 
 def is_rate_limit(exc):

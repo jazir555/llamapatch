@@ -10,8 +10,10 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
 `src/*` files), go stale, or break the build. So:
 
 1. **Triage first, merge second.** `fetch_prs.py` scores all open PRs by
-   perf keywords + perf paths, penalizes huge diffs, skips drafts /
-   `do-not-merge`. Only the top-N get expensive detail API calls.
+   perf keywords (stem-aware word matching: `fix` hits fixed/fixes but not
+   prefix, `bug` never matches debug) + perf paths, penalizes huge diffs,
+   skips drafts / `do-not-merge`. Only the top-N get expensive detail API
+   calls.
 2. **Merge via `pull/N/head` refspec, not fork remotes.** `git fetch origin
    pull/N/head:pr/N` needs no token, no per-fork remote (unlike
    `scripts/pr2wt.sh`, which is for interactive single-PR worktrees).
@@ -24,16 +26,24 @@ Manual merging is impossible: PRs step on each other (same `ggml/src/*`,
    Verdicts are intent-aware (`pr_intent.py`): a CUDA/Metal/Vulkan/SYCL perf
    PR showing CPU parity is the *correct* outcome on a CPU box (gain lives
    on that backend) — recorded as `parity`, never punished; only a true
-   >15% tg regression quarantines. CPU/generic perf must show `improvement`
-   to prove its claim. The bench baseline is pinned to the base SHA
-   (`bench_baseline_sha`) and rebuilds automatically after any rebase/base
-   move, so verdicts never compare against a stale base.
+   >15% tg regression quarantines. **Only measured improvements stay: a
+   CPU/generic perf PR that claims a gain but benches within noise is
+   reverted and quarantined as `no-improvement`.** Fixes/features prove
+   their intent via green correctness gates + no regression. The bench
+   baseline is pinned to the base SHA (`bench_baseline_sha`) and rebuilds
+   automatically after any rebase/base move, so verdicts never compare
+   against a stale base.
 5. **Self-heal:** merge conflict / CI-red / build fail / smoke fail /
-   perplexity fail / regression / empty (already-upstream) noop all
-   quarantine or record the culprit(s) and continue. Transient fetch/git
-   failures quarantine as `fetch-failed`/`git-timeout` (never as conflicts)
-   and `--doctor` requeues them for retry — a dead fork simply
-   re-quarantines next run. Full log in `lab-log.jsonl`.
+   perplexity fail / regression / no-improvement / empty (already-upstream)
+   noop all quarantine or record the culprit(s) and continue. Transient
+   fetch/git failures quarantine as `fetch-failed`/`git-timeout` (never as
+   conflicts) and `--doctor` requeues them for retry — a dead fork simply
+   re-quarantines next run. After the loop, a **final post-run gate**
+   re-verifies the merged tree (interactions can regress after individual
+   gates pass) and walks back culprits as `late-*`, then **re-verifies that
+   claimed gains still hold in aggregate** (`IMPROVEMENTS verified/lost` —
+   report-only, never auto-reverts since combined gains need not stack).
+   Full log in `lab-log.jsonl`.
 
 ## Layout
 
@@ -73,7 +83,7 @@ python3 pr-lab/merge_lab.py --candidates candidates.json --batch 10 --max-prs 50
 
 Self-test (no network, no models, runs on Windows):
 ```bash
-python3 test_lab.py   # 129 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient
+python3 test_lab.py   # 186 checks: bench/smoke/batch/CI/doctor/sanitize/state-heal/intent/preflight/timeouts/report/ratelimit/pages/baseline/cleanstart/models/lock/transient/quar/scoring/deadcode/transport/gates/final/improvement
 python3 test_e2e_mock.py  # 22 checks: merge/conflict/noop/doctor + full run() 10-batch + resume + fetch-retry
 ```
 

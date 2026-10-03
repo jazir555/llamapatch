@@ -331,6 +331,10 @@ cands = [{"number": 29110, "title": "metal kernels"}, {"number": 29806, "title":
          {"number": 28952, "title": "FP8 support"}]
 rep = M.build_report(state, quar, cands)
 check("report-counts", "merged: 2" in rep and "quarantined: 1" in rep, rep[:200])
+check("report-pending", "pending: 0" in rep, rep[:200])
+check("report-pending-open",
+      "pending: 2" in M.build_report({"merged": [1], "quarantined": []},
+                                     [], [{"number": 1}, {"number": 2}, {"number": 3}]))
 check("report-rows", "#29110" in rep and "#29806" in rep and "#28952" in rep)
 check("report-verdicts", "parity" in rep and "improvement" in rep)
 check("report-gains", "proven improvements (1)" in rep and "#29806" in rep.split("proven")[-1])
@@ -559,6 +563,325 @@ with tempfile.TemporaryDirectory() as td:
           len(lab.quar) == 2
           and [q["reason"] for q in lab.quar] == ["fetch-failed", "merge-conflict"],
           str(lab.quar))
+
+# 24. stem-aware triage scoring (no more debug-is-bug)
+from fetch_prs import score_title as _st
+_check_cfg = lambda *kws: {"perf_keywords": list(kws)}
+check("score-word", _st("Prefix parsing fix", "", _check_cfg("fix")) == (1, ["fix"]))
+check("score-stem",
+      _st("Fixes prefixes in suffixes", "", _check_cfg("fix")) == (1, ["fix"]))
+check("score-debug-not-bug", _st("debug build", "", _check_cfg("bug")) == (0, []))
+check("score-phrase", _st("add support for X", "", _check_cfg("add ")) == (1, ["add "]))
+check("score-multiword",
+      _st("flash attention kernel", "", _check_cfg("flash attention", "kernel"))[0] == 2)
+check("score-case-plural", _st("CUDA kernels", "", _check_cfg("cuda")) == (1, ["cuda"]))
+check("score-punct-substr",
+      _st("top-k loop", "", _check_cfg("top-k")) == (1, ["top-k"]))
+
+# 25. dead code stays dead (stacked-merge stubs confused every reader)
+check("no-merge-one", not hasattr(M.Lab, "merge_one"))
+check("no-try-merge", not hasattr(M.Lab, "try_merge"))
+check("no-commit-batch", not hasattr(M.Lab, "commit_batch"))
+
+# 26. triage transport never hangs (timeout reaches urlopen; headers right)
+import io as _io
+import urllib.request as _urlreq
+import fetch_prs as _fp
+_orig_open = _urlreq.urlopen
+_seen = {}
+class _FakeResp:
+    headers = {"X": "1"}
+    def __init__(self, payload):
+        self._io = _io.StringIO(payload)
+    def read(self, *a):
+        return self._io.read(*a)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+def _fake_open(req_obj, **kw):
+    _seen.clear()
+    _seen.update(kw)
+    _seen["request"] = req_obj
+    return _FakeResp('{"a": 1}')
+_urlreq.urlopen = _fake_open
+try:
+    data, hdrs = _fp.req("http://example/x", "tok123")
+    check("req-parses", data == {"a": 1}, str(data))
+    check("req-timeout", _seen.get("timeout") == 60, str(_seen))
+    check("req-auth", _seen["request"].get_header("Authorization") == "Bearer tok123")
+    check("req-accept", "github+json" in (_seen["request"].get_header("Accept") or ""))
+    data2, _ = _fp.req("http://example/x", None)
+    check("req-noauth", data2 == {"a": 1}
+          and _seen["request"].get_header("Authorization") is None)
+finally:
+    _urlreq.urlopen = _orig_open
+
+# 27. run_gates bench verdicts (regression reverts, improvement credits)
+def _benchlab(sd, model, baseline):
+    a = _mklab("/tmp/llamapatch-norepo", sd, [{"number": 77, "title": "t"}])
+    a.base = "master"; a.batch = 10; a.max_prs = 50
+    a.targets = ["t"]; a.build_type = "Release"; a.jobs = 2
+    a.smoke_model = ""; a.bench_model = model; a.pp = 32; a.tg = 32
+    a.regression_pct = 15; a.skip_ci_red = True
+    a.ppl_threshold = 0.0; a.ppl_sample = ""; a.build_timeout = 3600
+    lab = M.Lab(a)
+    lab.state["base_sha"] = "base1"
+    lab.state["bench_baseline"] = baseline
+    lab.state["bench_baseline_sha"] = "base1"
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    return lab
+
+def _gitrepo(td, extra="v2\n"):
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")[1].strip()
+    open(os.path.join(repo, "f.txt"), "w").write(extra)
+    _git(repo, "commit", "-am", "merged-pr")
+    return repo, sd, base
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _benchlab(sd, model, 40.0)
+    lab.repo = repo  # real repo for revert; gates stubbed except bench
+    lab.bench = lambda: (True, 30.0, "slow")
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
+    check("regression-quarantined", lab.run_gates(77, intent) is False)
+    check("regression-reason",
+          any(q["pr"] == 77 and q["reason"] == "perf-regression" for q in lab.quar),
+          str(lab.quar))
+    check("regression-reverted",
+          _git(repo, "rev-parse", "HEAD")[1].strip() == base)
+    check("regression-verdict-stored",
+          lab.state["bench_results"]["77"]["verdict"] == "regression",
+          str(lab.state["bench_results"]))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _benchlab(sd, model, 40.0)
+    lab.repo = repo
+    head = _git(repo, "rev-parse", "HEAD")[1].strip()
+    lab.bench = lambda: (True, 50.0, "fast")
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
+    check("improvement-counted", lab.run_gates(77, intent) is True)
+    check("improvement-kept", _git(repo, "rev-parse", "HEAD")[1].strip() == head)
+    check("improvement-merged", 77 in lab.state["merged"])
+    check("improvement-verdict-stored",
+          lab.state["bench_results"]["77"]["verdict"] == "improvement")
+    check("improvement-logged", '"improvement"' in open(lab.log_f).read())
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _benchlab(sd, model, 40.0)
+    lab.repo = repo
+    lab.bench = lambda: (True, 40.5, "parity")
+    intent = {"area": "perf", "backends": ["cuda"], "expects_bench_gain": False}
+    check("backend-parity-counted", lab.run_gates(77, intent) is True)
+    check("backend-parity-verdict",
+          lab.state["bench_results"]["77"]["verdict"] == "parity")
+
+# 28. shell entrypoints stay syntactically valid (broken bash = dead lab)
+import shutil as _shutil
+import subprocess as _sp3
+_bash = _shutil.which("bash")
+_scripts = ["triage-1k.sh", "llamapatch", "fetch_models.sh"]
+if _bash:
+    import re as _re2
+    for _s in _scripts:
+        # The bash on PATH may be WSL (Windows files under /mnt/c) or
+        # Git-Bash (accepts C:/...). Try each spelling; pass on the first
+        # that parses.
+        _p = os.path.join(_here, _s).replace("\\", "/")
+        _m = _re2.match(r"^([A-Za-z]):/(.*)$", _p)
+        _cands = ([f"/mnt/{_m.group(1).lower()}/{_m.group(2)}", _p] if _m else [_p])
+        _ok, _err = False, ""
+        for _c in _cands:
+            _r = _sp3.run([_bash, "-n", _c],
+                          capture_output=True, text=True, timeout=60)
+            if _r.returncode == 0:
+                _ok = True
+                break
+            _err = _r.stderr[:300]
+        check(f"bash-syntax-{_s}", _ok, _err)
+    _tri = open(os.path.join(_here, "triage-1k.sh")).read()
+    check("triage-emits-report", "--report --report-out" in _tri)
+    _lp = open(os.path.join(_here, "llamapatch")).read()
+    check("entrypoint-report-cmd", "report)" in _lp and "--report" in _lp)
+else:
+    check("bash-syntax-skipped", True)
+
+# 29. post-run final verify: catch regressions AFTER merges, heal by revert
+def _heallab(sd, model, baseline=40.0):
+    lab = _benchlab(sd, model, baseline)
+    lab.a.heal_walk = 10
+    return lab
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 : 40 t/s")
+    lab.bench = lambda: (True, 40.5, "parity")
+    lab.state["merged"] = [77]
+    st, _ = lab.final_verify_and_heal([77])
+    check("final-clean", st == "clean", st)
+    check("final-clean-keeps", lab.state["merged"] == [77])
+
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "A")
+    open(os.path.join(repo, "f.txt"), "w").write("v3\n")
+    _git(repo, "commit", "-am", "B")
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 ok")
+    def _headbench():
+        content = open(os.path.join(repo, "f.txt")).read()
+        return (True, 30.0, "slow") if "v3" in content else (True, 40.0, "ok")
+    lab.bench = _headbench
+    lab.state["merged"] = [71, 72]
+    st, _ = lab.final_verify_and_heal([71, 72])
+    check("final-healed", st == "healed", st)
+    check("final-heal-drops-culprit", lab.state["merged"] == [71],
+          str(lab.state["merged"]))
+    check("final-heal-quarantines",
+          any(q["pr"] == 72 and q["reason"] == "late-regression" for q in lab.quar),
+          str(lab.quar))
+    check("final-heal-content", open(os.path.join(repo, "f.txt")).read() == "v2\n")
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td, extra="v3\n")
+    open(os.path.join(repo, "f.txt"), "w").write("v4\n")
+    _git(repo, "commit", "-am", "C")
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.a.heal_walk = 1
+    lab.repo = repo
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 30.0, "always slow")
+    lab.state["merged"] = [71, 72]
+    st, detail = lab.final_verify_and_heal([71, 72])
+    check("final-capped", st == "capped", f"{st} {detail}")
+    check("final-cap-shrinks-one", lab.state["merged"] == [71],
+          str(lab.state["merged"]))
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _heallab(sd, model)
+    lab.repo = repo
+    calls = {"build": 0}
+    def _flaky_build():
+        calls["build"] += 1
+        return (False, "boom") if calls["build"] == 1 else (True, "ok")
+    lab.build = _flaky_build
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 40.0, "parity")
+    lab.state["merged"] = [71]
+    st, _ = lab.final_verify_and_heal([71])
+    check("final-build-healed", st == "healed", st)
+    check("final-build-quarantines",
+          any(q["pr"] == 71 and q["reason"] == "late-build-failed" for q in lab.quar),
+          str(lab.quar))
+    check("final-skipped", lab.final_verify_and_heal([])[0] == "skipped")
+
+# 30. only measured improvements stay (perf claims must prove the gain)
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _benchlab(sd, model, 40.0)
+    lab.repo = repo
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 40.5, "parity-noise")
+    intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
+    check("no-improvement-rolled-back", lab.run_gates(77, intent) is False)
+    check("no-improvement-quarantined",
+          any(q["pr"] == 77 and q["reason"] == "no-improvement" for q in lab.quar),
+          str(lab.quar))
+    check("no-improvement-reverted",
+          _git(repo, "rev-parse", "HEAD")[1].strip() == base)
+    check("no-improvement-not-merged", 77 not in lab.state["merged"])
+
+with tempfile.TemporaryDirectory() as td:
+    repo, sd, base = _gitrepo(td)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _benchlab(sd, model, 40.0)
+    lab.repo = repo
+    head = _git(repo, "rev-parse", "HEAD")[1].strip()
+    lab.build = lambda: (True, "ok")
+    lab.smoke = lambda: (True, "tg32 ok")
+    lab.bench = lambda: (True, 40.2, "parity")
+    intent = {"area": "fix", "backends": [], "expects_bench_gain": False}
+    check("fix-parity-kept", lab.run_gates(77, intent) is True)
+    check("fix-parity-head", _git(repo, "rev-parse", "HEAD")[1].strip() == head)
+
+# 31. post-heal improvement verification (gains must survive the batch)
+def _implab(sd, model, results):
+    lab = _benchlab(sd, model, 40.0)
+    lab.state["bench_results"] = dict(results)
+    return lab
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _implab(sd, model, {"77": {"tg": 48.0, "verdict": "improvement"}})
+    lab.bench = lambda: (True, 47.0, "holds")
+    st, detail = lab.verify_improvements_final([77])
+    check("improvements-verified", st == "verified", f"{st} {detail}")
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _implab(sd, model, {"77": {"tg": 48.0, "verdict": "improvement"}})
+    lab.bench = lambda: (True, 41.0, "diluted")
+    st, detail = lab.verify_improvements_final([77])
+    check("improvements-lost", st == "lost" and "77" in detail, f"{st} {detail}")
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _implab(sd, model, {"77": {"tg": 40.2, "verdict": "parity"}})
+    lab.bench = lambda: (_ for _ in ()).throw(AssertionError("must not bench"))
+    st, _ = lab.verify_improvements_final([77])
+    check("improvements-na", st == "na", st)
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _implab(sd, model, {"77": {"tg": 48.0, "verdict": "improvement"}})
+    lab.a.bench_model = ""
+    lab.bench = lambda: (_ for _ in ()).throw(AssertionError("must not bench"))
+    st, _ = lab.verify_improvements_final([77])
+    check("improvements-skipped", st == "skipped", st)
+
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _implab(sd, model, {"77": {"tg": 48.0, "verdict": "improvement"}})
+    import subprocess as _sp4
+    lab.bench = lambda: (_ for _ in ()).throw(_sp4.TimeoutExpired("bench", 600))
+    st, _ = lab.verify_improvements_final([77])
+    check("improvements-flake", st == "unverified", st)
 
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

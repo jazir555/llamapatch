@@ -26,7 +26,7 @@ Interaction failures (A+B fail but each passes alone) are logged as
 batch-overlap-warn for manual review — pairs are never retried (avoids
 combinatorial explosion across 1k PRs).
 """
-import argparse, json, os, re, subprocess, sys, time, datetime
+import argparse, json, os, re, subprocess, time, datetime
 
 try:
     from pr_intent import classify_intent, verdict_for
@@ -170,10 +170,14 @@ def build_report(state, quar, cands):
     bench = state.get("bench_results", {}) or {}
     base = state.get("bench_baseline")
     base_sha = (state.get("bench_baseline_sha") or "")[:8] or "?"
+    cand_nums = {c.get("number") for c in cands
+                 if isinstance(c, dict) and isinstance(c.get("number"), int)}
+    pending_n = len(cand_nums - set(merged) - set(state.get("quarantined", []) or []))
     L = [f"# llamapatch report",
          f"",
          f"- merged: {len(merged)} | quarantined: {len(state.get('quarantined', []) or [])} | "
-         f"batches: {state.get('batches_done', 0)} | baseline tg: {base} @ {base_sha}",
+         f"pending: {pending_n} | batches: {state.get('batches_done', 0)} | "
+         f"baseline tg: {base} @ {base_sha}",
          f""]
     L.append("## merged")
     if not merged:
@@ -284,7 +288,8 @@ class Lab:
 
     def log(self, **kw):
         kw["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        open(self.log_f, "a").write(json.dumps(kw) + "\n")
+        with open(self.log_f, "a") as f:
+            f.write(json.dumps(kw) + "\n")
         print(f"[{kw.get('event')}] {json.dumps({k: v for k, v in kw.items() if k not in ('ts','event')})[:220]}")
 
     def git(self, cmd, check=False):
@@ -427,13 +432,6 @@ class Lab:
             return True, f"local-pr/{n}-fallback"
         return False, out
 
-    def merge_one(self, n):
-        raise RuntimeError("merge_one removed: stacked uncommitted merges are "
-                           "impossible in git (MERGE_HEAD). Use merge_one_committed.")
-
-    def try_merge(self, nums):
-        raise RuntimeError("try_merge removed: see merge_one. Batches now commit per-PR.")
-
     def build(self):
         btimeout = getattr(self.a, "build_timeout", 3600)
         cfg = f"cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE={self.a.build_type}"
@@ -466,7 +464,8 @@ class Lab:
         rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -80", self.repo)
         val = parse_bench_output(out)
         try:
-            open(os.path.join(self.a.state_dir, "last-bench.txt"), "w").write(out)
+            with open(os.path.join(self.a.state_dir, "last-bench.txt"), "w") as f:
+                f.write(out)
         except Exception:
             pass
         return rc == 0, val, out
@@ -556,23 +555,6 @@ class Lab:
         if rc == 0 and not out.strip():
             return True, "noop-empty"
         return True, None
-
-    def commit_batch(self, nums):
-        """Legacy batch commit (octopus). Kept for compat; verified."""
-        rc, out = self.git("status --porcelain")
-        if rc != 0 or not out.strip():
-            return False, "nothing-to-commit"
-        rc, out = self.git(f"commit -m 'pr-lab: merge {'+'.join(f'#{n}' for n in nums)}'")
-        if rc != 0:
-            return False, out[-1500:]
-        rc, out = self.git("rev-parse HEAD")
-        if rc != 0:
-            return False, "rev-parse-failed"
-        self.state["merged"].extend(nums)
-        self.state["batches_done"] += 1
-        self.save()
-        self.log(event="merged", prs=nums, total=len(self.state["merged"]), head=out.strip()[:8])
-        return True, out.strip()
 
     def perplexity(self):
         """Optional correctness gate: llama-perplexity on a WikiText sample.
@@ -680,10 +662,21 @@ class Lab:
             if verdict == "improvement":
                 self.log(event="improvement", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"))
+            elif verdict == "parity" and intent.get("expects_bench_gain") \
+                    and base and val:
+                # Claimed a gain this box can measure, produced none:
+                # roll back. Only measured improvements stay merged.
+                self.revert_last()
+                self.log(event="no-improvement", pr=n, val=val, base=base,
+                         area=intent.get("area"), backends=intent.get("backends"))
+                self.quarantine(n, "no-improvement",
+                                f"{val} vs {base} (no measured gain)")
+                return False
             else:
-                # parity (or no-baseline): for backend-only perf this is
-                # the CORRECT outcome on a CPU box — the gain lives on
-                # that backend. Record why, don't punish.
+                # parity with no gain expected (backend-only perf on a CPU
+                # box, fixes, features) or no baseline to judge against:
+                # green gates + no regression is this PR's proof. Record
+                # why, don't punish.
                 self.log(event="parity", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"),
                          expects_gain=intent.get("expects_bench_gain"))
@@ -765,6 +758,117 @@ class Lab:
         finally:
             release_lock(self.a.state_dir)
 
+    def _drop_merged(self, n):
+        """Remove a reverted culprit from the merged list (quarantine() only
+        appends to quarantined; without this the state claims a PR whose
+        commit is gone — exactly the phantom doctor would later drop)."""
+        if n in self.state["merged"]:
+            self.state["merged"] = [m for m in self.state["merged"] if m != n]
+
+    def final_verify_and_heal(self, new_merges):
+        """Post-run gate: per-PR gates pass at merge time, but regressions
+        can surface AFTER merges (interactions between PRs in the batch).
+        Re-verifies the final tree (build + smoke + bench vs baseline) and
+        walks HEAD back — reverting + quarantining each culprit as
+        late-{build,smoke,regression}-failed — until clean or the heal-walk
+        cap. Returns (status, detail) with status in clean/healed/capped/
+        skipped. A cap is loud (needs operator), never silent. Each PR
+        proved its own intent at merge time, so this gate only guards
+        no-breakage, it never re-litigates gains."""
+        if not new_merges:
+            return "skipped", "nothing merged this run"
+        cap = max(1, int(getattr(self.a, "heal_walk", 10) or 10))
+        remaining = list(new_merges)
+        steps = 0
+        while remaining and steps < cap:
+            try:
+                okb, bout = self.build()
+            except Exception as e:
+                okb, bout = False, f"build-{gate_error_reason(e)}: {e}"
+            if not okb:
+                culprit = remaining.pop()
+                self.revert_last()
+                self._drop_merged(culprit)
+                self.quarantine(culprit, "late-build-failed", str(bout)[-2000:])
+                self.log(event="late-heal", pr=culprit, gate="build")
+                steps += 1
+                continue
+            try:
+                oks, sout = self.smoke()
+            except Exception as e:
+                oks, sout = False, f"smoke-{gate_error_reason(e)}: {e}"
+            if not oks:
+                culprit = remaining.pop()
+                self.revert_last()
+                self._drop_merged(culprit)
+                self.quarantine(culprit, "late-smoke-failed", str(sout)[-2000:])
+                self.log(event="late-heal", pr=culprit, gate="smoke")
+                steps += 1
+                continue
+            if self.a.bench_model and (self.a.regression_pct or 0) > 0 and \
+               os.path.exists(os.path.expanduser(self.a.bench_model)) and \
+               self.state.get("bench_baseline"):
+                try:
+                    okbench, val, bout = self.bench()
+                except Exception as e:
+                    self.log(event="final-bench-flake", detail=str(e)[-500:])
+                    return ("healed" if steps else "unverified"), "bench infra flake"
+                if not okbench or val is None:
+                    self.log(event="final-bench-flake", detail=str(bout)[-1000:])
+                    return ("healed" if steps else "unverified"), "bench unparsed"
+                base = self.state["bench_baseline"]
+                if val < base * (1 - self.a.regression_pct / 100):
+                    culprit = remaining.pop()
+                    self.revert_last()
+                    self._drop_merged(culprit)
+                    self.quarantine(culprit, "late-regression", f"{val} vs {base}")
+                    self.log(event="late-heal", pr=culprit, gate="bench",
+                             val=val, base=base)
+                    br = self.state.setdefault("bench_results", {})
+                    if isinstance(br.get(str(culprit)), dict):
+                        br[str(culprit)]["verdict"] = "late-regression"
+                    self.save()
+                    steps += 1
+                    continue
+            break
+        if remaining and steps >= cap:
+            return "capped", f"still failing after {steps} reverts; needs operator"
+        return ("healed" if steps else "clean"), "final tree verified"
+
+    def verify_improvements_final(self, new_merges):
+        """Post-heal improvement check: per-PR gains were proven at merge
+        time, but later merges and heal-reverts can dilute them below the
+        threshold. Re-benches the final tree once against the baseline.
+
+        Returns (status, detail): verified (gain holds in aggregate),
+        lost (measured, gain gone — report only), unverified (bench flake),
+        skipped (no model/baseline), na (no improvement claims this run).
+
+        Never auto-reverts: combined gains need not stack linearly, so a
+        lost aggregate gain misattributes blame. The operator decides from
+        the logged claim list + final numbers.
+        """
+        br = self.state.get("bench_results", {}) or {}
+        claimed = [n for n in new_merges
+                   if isinstance(br.get(str(n)), dict)
+                   and br.get(str(n)).get("verdict") == "improvement"]
+        if not claimed:
+            return "na", "no improvement claims this run"
+        if not self.a.bench_model or not os.path.exists(os.path.expanduser(self.a.bench_model)):
+            return "skipped", "no bench model"
+        base = self.state.get("bench_baseline")
+        if not base:
+            return "skipped", "no baseline"
+        try:
+            okbench, val, bout = self.bench()
+        except Exception as e:
+            return "unverified", f"bench flake: {e}"[:300]
+        if not okbench or val is None:
+            return "unverified", f"bench unparsed: {str(bout)[-300:]}"
+        if val > base * (1 + self.a.regression_pct / 100):
+            return "verified", f"final {val} vs base {base} holds gains from {claimed}"
+        return "lost", f"final {val} vs base {base} loses gains claimed by {claimed}"
+
     def _run_locked(self, pending):
         self.preflight()
         self.ensure_identity()
@@ -778,6 +882,7 @@ class Lab:
         # baseline bench (7B model required; skip if absent; rebuilds when
         # the base SHA moved so verdicts compare against the right base)
         self.ensure_baseline()
+        merged_before = set(self.state["merged"])
         done = 0
         i = 0
         cand_by_num = {c["number"]: c for c in self.cands}
@@ -842,6 +947,19 @@ class Lab:
                     done += 1
                 continue
             i += self.a.batch
+        # Post-run gate: per-PR gates pass at merge time, but interactions
+        # can regress the tree AFTER merges. Verify the final tree and
+        # self-heal (revert + quarantine culprits) before reporting DONE.
+        new_merges = [n for n in self.state["merged"] if n not in merged_before]
+        if new_merges:
+            status, detail = self.final_verify_and_heal(new_merges)
+            self.log(event="final-verify", status=status, detail=str(detail)[:300])
+            print(f"FINAL {status}: {detail}", flush=True)
+            if status in ("clean", "healed"):
+                istatus, idetail = self.verify_improvements_final(new_merges)
+                self.log(event="final-improvements", status=istatus,
+                         detail=str(idetail)[:300])
+                print(f"IMPROVEMENTS {istatus}: {idetail}", flush=True)
         print(f"DONE merged={self.state['merged']} quarantined={len(self.state['quarantined'])}", flush=True)
 
     def doctor(self):
@@ -887,6 +1005,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--build-timeout", type=int, default=3600,
                     help="seconds per cmake configure/build before build-timeout quarantine")
+    ap.add_argument("--heal-walk", type=int, default=10,
+                    help="max post-run final-verify reverts before stopping loudly")
     ap.add_argument("--smoke-model", default="~/llama-pr-lab/models/tinyllama.gguf")
     ap.add_argument("--bench-model", default="~/llama-pr-lab/models/qwen2.5-7b-00001-of-00002.gguf")
     ap.add_argument("--pp", type=int, default=32)
