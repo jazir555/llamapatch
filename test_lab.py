@@ -575,6 +575,46 @@ with tempfile.TemporaryDirectory() as td:
     check("doctor-prunes-heads", lab.state.get("merged_heads") == {},
           str(lab.state.get("merged_heads")))
 
+# 39. doctor verifies merge parents against tested SHAs
+with tempfile.TemporaryDirectory() as td:
+    repo = os.path.join(td, "repo"); sd = os.path.join(td, "st")
+    os.makedirs(repo); os.makedirs(sd)
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    open(os.path.join(repo, "f.txt"), "w").write("v1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-m", "base")
+    a = _mklab(repo, sd, [{"number": 7}, {"number": 8}])
+    a.base = "master"
+    lab = M.Lab(a)
+    lab.state["base_sha"] = _git(repo, "rev-parse", "HEAD")[1].strip()
+    _git(repo, "checkout", "-b", "pr/7")
+    open(os.path.join(repo, "f.txt"), "w").write("v2\n")
+    _git(repo, "commit", "-am", "pr7")
+    head7 = _git(repo, "rev-parse", "HEAD")[1].strip()
+    _git(repo, "checkout", "master")
+    _git(repo, "merge", "--no-ff", "--no-edit", "pr/7")
+    _git(repo, "commit", "--amend", "-m", "pr-lab: merge #7 seven")
+    _git(repo, "checkout", "-b", "pr/8")
+    open(os.path.join(repo, "f.txt"), "w").write("v3\n")
+    _git(repo, "commit", "-am", "pr8")
+    head8 = _git(repo, "rev-parse", "HEAD")[1].strip()
+    _git(repo, "checkout", "master")
+    _git(repo, "merge", "--no-ff", "--no-edit", "pr/8")
+    _git(repo, "commit", "--amend", "-m", "Merge branch 'pr/8' into master")
+    check("merge-parents",
+          lab.merge_parents() == {7: head7, 8: head8}, str(lab.merge_parents()))
+    lab.state["merged"] = [7]
+    lab.state["merged_heads"] = {"7": "0" * 40}
+    lab.save()
+    lab.doctor()
+    check("doctor-warns-moved",
+          lab.state["merged"] == [7] and any("#7" in w for w in lab.doctor_warnings),
+          str(lab.doctor_warnings))
+    lab.state["merged_heads"] = {"7": head7}
+    lab.save()
+    lab.doctor()
+    check("doctor-quiet-match", lab.doctor_warnings == [], str(lab.doctor_warnings))
+
 # 23. quarantine dedup (retry cycles must not grow the file unboundedly)
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)

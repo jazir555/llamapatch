@@ -522,6 +522,29 @@ class Lab:
         self.state["batches_done"] += 1
         self.save()
 
+    def merge_parents(self):
+        """{pr: second-parent SHA} for our merge commits on this branch.
+
+        The second parent of a --no-ff merge is the PR head ref exactly as
+        merged — the ground truth record_merged()'s SHA must equal. Matches
+        both v4 amended messages and legacy v3 default merge messages."""
+        base = self.state.get("base_sha") or getattr(self.a, "base", "master")
+        rc, out = self.git(f"log --format=%H%x1f%P%x1f%s {base}..HEAD")
+        if rc != 0:
+            return {}
+        res = {}
+        for line in out.strip().splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 3:
+                continue
+            _, parents, subj = parts
+            m = (re.search(r"pr-lab: merge #(\d+)", subj)
+                 or re.search(r"Merge branch 'pr/(\d+)'", subj))
+            ps = parents.split()
+            if m and len(ps) >= 2:
+                res[int(m.group(1))] = ps[1]
+        return res
+
     def merge_one_committed(self, n, batch_tag):
         """Fetch + merge + amend-message a single PR. Returns (ok, reason).
 
@@ -1047,7 +1070,11 @@ class Lab:
         stacking bug (never truly conflict-tested), and requeues transient
         fetch/git quarantines for retry (a dead fork simply re-quarantines
         next run). Matches both '#N' (v4 amended messages) and legacy
-        'pr/N' (v3 default merge messages)."""
+        'pr/N' (v3 default merge messages). Also verifies each kept merge's
+        commit second parent against the recorded tested SHA: a mismatch
+        means the branch moved after merge testing (warning only — the
+        commit still exists, so no auto-drop)."""
+        self.doctor_warnings = []
         rc, out = self.git(f"log --format=%s {self.state.get('base_sha', self.a.base)}..HEAD")
         subjects = out if rc == 0 else ""
         fixed_merged, fixed_quar, requeued = [], [], []
@@ -1077,6 +1104,17 @@ class Lab:
             keep = {str(m) for m in fixed_merged}
             for k in [k for k in mh if k not in keep]:
                 del mh[k]
+        # Provenance check: the merge commit's second parent must equal the
+        # SHA that was actually gated. Warn only.
+        if isinstance(mh, dict) and mh:
+            parents = self.merge_parents()
+            for n in fixed_merged:
+                want, got = mh.get(str(n)), parents.get(n)
+                if want and got and got != want:
+                    w = (f"#{n} tree parent {got[:8]} != tested {want[:8]} "
+                         f"(branch moved after merge)")
+                    print(f"doctor: WARNING {w}")
+                    self.doctor_warnings.append(w)
         self.state["quarantined"] = [n for n in self.state["quarantined"] if n not in requeued]
         self.quar = fixed_quar
         self.save()
