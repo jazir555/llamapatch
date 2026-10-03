@@ -768,7 +768,7 @@ check("no-commit-batch", not hasattr(M.Lab, "commit_batch"))
 # 26. triage transport never hangs (timeout reaches urlopen; headers right)
 import io as _io
 import urllib.request as _urlreq
-import fetch_prs as _fp
+import fetch_prs as F
 _orig_open = _urlreq.urlopen
 _seen = {}
 class _FakeResp:
@@ -788,12 +788,12 @@ def _fake_open(req_obj, **kw):
     return _FakeResp('{"a": 1}')
 _urlreq.urlopen = _fake_open
 try:
-    data, hdrs = _fp.req("http://example/x", "tok123")
+    data, hdrs = F.req("http://example/x", "tok123")
     check("req-parses", data == {"a": 1}, str(data))
     check("req-timeout", _seen.get("timeout") == 60, str(_seen))
     check("req-auth", _seen["request"].get_header("Authorization") == "Bearer tok123")
     check("req-accept", "github+json" in (_seen["request"].get_header("Accept") or ""))
-    data2, _ = _fp.req("http://example/x", None)
+    data2, _ = F.req("http://example/x", None)
     check("req-noauth", data2 == {"a": 1}
           and _seen["request"].get_header("Authorization") is None)
 finally:
@@ -1390,7 +1390,6 @@ check("intent-server-cpu-visible", _srv["expects_bench_gain"], str(_srv))
 check("intent-backends-pure", _db({"labels": ["CUDA"], "title": "", "files": []}) == ["cuda"])
 
 # 52. stage-2 enrichment end to end (mocked API, real main())
-import fetch_prs as F
 import urllib.request as _ur
 _PRS52 = [
     {"number": 11, "title": "faster sgemm kernels", "body": "",
