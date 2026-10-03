@@ -973,5 +973,26 @@ check("report-late-healed", "post-run healed" in _rep and "#72" in _rep
 check("report-no-late",
       "post-run healed" not in M.build_report({"merged": [71]}, [], [{"number": 71}]))
 
+# 35. git ops time out in minutes, not half-hours (hung fetch stalls batches)
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    a = _mklab(os.path.join(td, "norepo"), sd, [{"number": 1}])
+    lab = M.Lab(a)
+    _orig_sh, _seen = M.sh, {}
+    def _cap_sh(cmd, cwd, **kw):
+        _seen.clear()
+        _seen.update(kw)
+        _seen["cmd"] = cmd
+        return 0, ""
+    M.sh = _cap_sh
+    try:
+        rc, _ = lab.git("status --porcelain")
+        check("git-timeout-default", rc == 0 and _seen.get("timeout") == 300,
+              str(_seen))
+        lab.git("fetch origin pull/1/head:pr/1 --force", timeout=60)
+        check("git-timeout-override", _seen.get("timeout") == 60, str(_seen))
+    finally:
+        M.sh = _orig_sh
+
 print(f"\n{len(FAIL)} failures")
 sys.exit(1 if FAIL else 0)

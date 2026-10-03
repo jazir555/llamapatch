@@ -301,8 +301,11 @@ class Lab:
             f.write(json.dumps(kw) + "\n")
         print(f"[{kw.get('event')}] {json.dumps({k: v for k, v in kw.items() if k not in ('ts','event')})[:220]}")
 
-    def git(self, cmd, check=False):
-        return sh(f"git {cmd}", self.repo, check=check)
+    def git(self, cmd, check=False, timeout=300):
+        # Git plumbing is fast; a hung fetch/merge must fail into retry and
+        # timeout-quarantine within minutes, never stall a 10-batch for the
+        # 30-minute bulk-command default.
+        return sh(f"git {cmd}", self.repo, check=check, timeout=timeout)
 
     def git_args(self, args):
         """Shell-free git invocation (for messages with arbitrary titles)."""
