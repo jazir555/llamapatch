@@ -53,6 +53,11 @@ check("pid-neg", not M.pid_alive(-5))
 check("pid-str", not M.pid_alive("1234"))
 check("pid-none", not M.pid_alive(None))
 
+# cool_down: zero/None/negative are instant no-ops (no sleeping in tests)
+_t0 = __import__("time").perf_counter()
+M.cool_down(0); M.cool_down(None); M.cool_down(-5); M.cool_down("xx")
+check("cooldown-noop", __import__("time").perf_counter() - _t0 < 5)
+
 # acquire_lock: steals dead-pid locks, refuses live ones
 _d = tempfile.mkdtemp()
 json.dump({"pid": 999999999, "ts": "x"}, open(os.path.join(_d, "lab.lock"), "w"))

@@ -128,6 +128,19 @@ def hot_box_tripped(streak, limit=3):
     return isinstance(streak, list) and len(streak) >= limit
 
 
+def cool_down(secs):
+    """Inter-bench thermal settle: sleep max(0, secs). Back-to-back 7B
+    benches heat-soak small boxes until every verdict reads as regression
+    (Oct 2026: two hot-box pauses in one night); a short settle between
+    benches keeps the box out of the throttle zone. Zero/None = no-op."""
+    try:
+        s = max(0.0, float(secs or 0))
+    except (TypeError, ValueError):
+        return
+    if s > 0:
+        time.sleep(s)
+
+
 def sanitize_merge_msg(n, title):
     """Shell-safe one-line merge message. Strips newlines/quotes/`$`."""
     clean = re.sub(r"[\r\n'\x60$\"\\;|&<>!()]+", " ", title or "")
@@ -622,6 +635,7 @@ class Lab:
                 f.write(out)
         except Exception:
             pass
+        cool_down(getattr(self.a, "cooldown_secs", 30))
         return rc == 0, val, out
 
     def quarantine(self, n, reason, detail=""):
@@ -1460,6 +1474,9 @@ def main():
     ap.add_argument("--bench-noise-pct", type=float, default=5.0,
                     help="boundary bench verdicts within this %% of their threshold "
                     "line get one confirmation run (verdict on the mean); 0 disables")
+    ap.add_argument("--cooldown-secs", type=float, default=30.0,
+                    help="settle sleep after every bench so back-to-back 7B runs "
+                    "don't heat-soak the box into false regressions; 0 disables")
     ap.add_argument("--skip-ci-red", dest="skip_ci_red", action="store_true", default=True)
     ap.add_argument("--no-skip-ci-red", dest="skip_ci_red", action="store_false")
     ap.add_argument("--ppl-threshold", type=float, default=0.0,
