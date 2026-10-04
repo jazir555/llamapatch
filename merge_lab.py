@@ -128,6 +128,22 @@ def hot_box_tripped(streak, limit=3):
     return isinstance(streak, list) and len(streak) >= limit
 
 
+HOT_RETRY_SECS = 90 * 60  # hot-box requeues ripen after 90 cool minutes
+
+
+def retry_ripe(stamp, now=None):
+    """Pure retry-ripeness: a hot-box requeue may only be retried after
+    its stamp. Missing/unparseable stamps are ripe (never strand a PR)."""
+    if not stamp:
+        return True
+    try:
+        ripe_at = float(stamp)
+    except (TypeError, ValueError):
+        return True
+    now = time.time() if now is None else now
+    return now >= ripe_at
+
+
 def cool_down(secs):
     """Inter-bench thermal settle: sleep max(0, secs). Back-to-back 7B
     benches heat-soak small boxes until every verdict reads as regression
@@ -391,7 +407,7 @@ class Lab:
         # like the GUI writes) may lack keys the loop indexes directly.
         for _k, _v in (("base_sha", None), ("branch", None), ("merged", []),
                        ("quarantined", []), ("bench_baseline", None),
-                       ("batches_done", 0)):
+                       ("batches_done", 0), ("hot_retry_after", {})):
             self.state.setdefault(_k, _v)
         if os.path.exists(self.quar_f):
             try:
@@ -980,9 +996,17 @@ class Lab:
                 if hot_box_tripped(self._hot_streak):
                     # The box is hot, not the PRs: requeue the whole
                     # streak for a cool retry and pause the run instead
-                    # of burning the queue on false verdicts.
+                    # of burning the queue on false verdicts. Retries
+                    # ripen after HOT_RETRY_SECS: without this the next
+                    # resume re-tests the same hot PRs first, rebuilds
+                    # heat in minutes, and trips again — a pause livelock
+                    # with zero forward progress (Oct 2026, twice in a row).
+                    ripe_at = time.time() + HOT_RETRY_SECS
+                    stamps = self.state.setdefault("hot_retry_after", {})
                     for m in self._hot_streak:
                         self.unquarantine(m)
+                        stamps[str(m)] = ripe_at
+                    self.save()
                     self.log(event="hot-box",
                              detail=f"paused after {len(self._hot_streak)} "
                                     f"straight regressions; requeued {self._hot_streak}")
@@ -1322,6 +1346,14 @@ class Lab:
             for n in batch:
                 if done >= self.a.max_prs or self._stop:
                     break
+                # Hot-box requeues ripen after a cool-down: retrying them
+                # first rebuilds heat and re-trips the guard (pause
+                # livelock). Skip the unripe; the rest of the queue makes
+                # progress meanwhile.
+                stamps = self.state.get("hot_retry_after") or {}
+                if not retry_ripe(stamps.get(str(n))):
+                    self.log(event="hot-box-cooldown-skip", pr=n)
+                    continue
                 # CI gate: skip red PRs before paying for a build (annotated
                 # by fetch_prs.py --include-ci; override with --no-skip-ci-red).
                 # Skipped, NOT quarantined: CI flips green on reruns/pushes,

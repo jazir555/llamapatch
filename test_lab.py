@@ -58,6 +58,13 @@ _t0 = __import__("time").perf_counter()
 M.cool_down(0); M.cool_down(None); M.cool_down(-5); M.cool_down("xx")
 check("cooldown-noop", __import__("time").perf_counter() - _t0 < 5)
 
+# retry_ripe: unripe stamps wait, missing/garbage/ripe pass
+check("ripe-missing", M.retry_ripe(None) and M.retry_ripe(""))
+check("ripe-garbage", M.retry_ripe("soon", now=100.0))
+check("ripe-past", M.retry_ripe(50.0, now=100.0))
+check("ripe-future", not M.retry_ripe(150.0, now=100.0))
+check("ripe-boundary", M.retry_ripe(100.0, now=100.0))
+
 # acquire_lock: steals dead-pid locks, refuses live ones
 _d = tempfile.mkdtemp()
 json.dump({"pid": 999999999, "ts": "x"}, open(os.path.join(_d, "lab.lock"), "w"))
