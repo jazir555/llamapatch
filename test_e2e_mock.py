@@ -285,10 +285,10 @@ with tempfile.TemporaryDirectory() as td:
     check("ci-flip-clean", lab2.state["quarantined"] == [],
           str(lab2.state["quarantined"]))
 
-# Scenario 5: noise guard end to end. Baseline anchors on the median of
-# three runs; a boundary per-PR reading earns one confirmation run through
-# the real run() loop instead of a noisy revert. Scripted bench values are
-# consumed in order: 3 baseline + 2 gate (boundary, clean) + final-verify.
+# Scenario 5: median verdict end to end. Baseline anchors on the median of
+# three runs; the per-PR verdict is the median of three gate runs through
+# the real run() loop, so one outlier can't revert a good PR. Scripted
+# bench values are consumed in order: 3 baseline + 3 gate + final-verify.
 with tempfile.TemporaryDirectory() as td:
     repo = os.path.join(td, "repo")
     statedir = os.path.join(td, "state")
@@ -311,22 +311,22 @@ with tempfile.TemporaryDirectory() as td:
     lab.a.regression_pct = 15
     lab.build = lambda: (True, "mock build ok")
     lab.smoke = lambda: (True, "tg32 : 40 t/s mock")
-    vals = [40.0, 40.0, 40.0, 33.5, 40.0]
+    vals = [40.0, 40.0, 40.0, 33.5, 40.0, 40.0]
     def _seq():
         v = vals.pop(0) if len(vals) > 1 else vals[0]
         return (True, v, f"v={v}")
     lab.bench = _seq
     lab.run()
-    check("confirm-e2e-merged", lab.state["merged"] == [401],
+    check("median-e2e-merged", lab.state["merged"] == [401],
           str(lab.state["merged"]))
-    check("confirm-e2e-base-mean",
+    check("median-e2e-base",
           lab.state["bench_baseline"] == 40.0
           and lab.state.get("bench_baseline_runs") == [40.0, 40.0, 40.0],
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
     br = lab.state.get("bench_results", {}).get("401", {})
-    check("confirm-e2e-runs", br.get("runs") == [33.5, 40.0]
-          and br.get("verdict") == "parity", str(br))
-    check("confirm-e2e-logged", '"bench-confirmed"' in open(lab.log_f).read())
+    check("median-e2e-runs", br.get("runs") == [33.5, 40.0, 40.0]
+          and br.get("verdict") == "parity" and br.get("tg") == 40.0, str(br))
+    check("median-e2e-logged", '"bench-median"' in open(lab.log_f).read())
 
 # Scenario 6: infra abort end to end. Smoke fails on the first PR and on
 # the clean tree too (dead toolchain model): run() must raise WITHOUT

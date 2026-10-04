@@ -29,7 +29,7 @@ combinatorial explosion across 1k PRs).
 import argparse, hashlib, json, os, re, subprocess, time, datetime
 
 try:
-    from pr_intent import classify_intent, needs_confirm, verdict_for
+    from pr_intent import classify_intent, verdict_for
 except ImportError:  # pragma: no cover - standalone fallback
     def classify_intent(cand):
         return {"backends": [], "area": "other", "expects_bench_gain": False,
@@ -722,7 +722,16 @@ class Lab:
         # box and the bench would otherwise measure the build's heat, not
         # the PR (Oct 2026: cool box re-throttled 6 minutes after resume).
         cool_down(getattr(self.a, "cooldown_secs", 30))
-        bench = os.path.join(self.repo, "build", "bin", "llama-bench")
+        ok, val, out = self._bench_in(self.repo, "")
+        cool_down(getattr(self.a, "cooldown_secs", 30))
+        return ok, val, out
+
+    def _bench_in(self, repo_dir, tag):
+        """Bench one checkout: returns (ok, tg-or-None, output). tag picks
+        the forensics file ("" -> last-bench.txt, "base" ->
+        last-bench-base.txt). Shared by the campaign tree and the
+        interleaved clean-base worktree so both arms measure identically."""
+        bench = os.path.join(repo_dir, "build", "bin", "llama-bench")
         model = os.path.expanduser(self.a.bench_model)
         if getattr(self.a, "cuda_bench", False):
             # VRAM-cliff guard: benching over the spill edge measures the
@@ -739,15 +748,74 @@ class Lab:
                 detail = f"vram free {free}MB < 1.3x model; cliff-suspect, bench refused"
                 self.log(event="vram-cliff-refused", detail=detail, ambient=amb)
                 return False, None, detail
-        rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -300", self.repo)
+        rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -300", repo_dir)
         val = parse_bench_output(out)
+        fname = f"last-bench-{tag}.txt" if tag else "last-bench.txt"
         try:
-            with open(os.path.join(self.a.state_dir, "last-bench.txt"), "w") as f:
+            with open(os.path.join(self.a.state_dir, fname), "w") as f:
                 f.write(out)
         except Exception:
             pass
-        cool_down(getattr(self.a, "cooldown_secs", 30))
         return rc == 0, val, out
+
+    def base_worktree(self):
+        """Sibling clean-base worktree (basecheck) when it exists at the
+        campaign's base SHA with a built bench binary; else None. The
+        interleaved control arm lives here instead of disturbing the
+        campaign branch."""
+        sib = os.path.join(os.path.dirname(self.repo.rstrip(os.sep)), "basecheck")
+        if not os.path.exists(os.path.join(sib, "build", "bin", "llama-bench")):
+            return None
+        rc, head = sh("git rev-parse HEAD", sib)
+        if rc != 0 or not head.strip():
+            return None
+        if self.state.get("base_sha") and head.strip() != self.state.get("base_sha"):
+            return None
+        return sib
+
+    def interleave_base(self):
+        """Bench the clean base in its worktree (same flags, same hour,
+        same heat state) and store it as this batch's reference. Returns
+        the tg value or None when no usable worktree exists (caller falls
+        back to bench_baseline). One extra bench per 10-batch."""
+        sib = self.base_worktree()
+        if sib is None:
+            return None
+        cool_down(getattr(self.a, "cooldown_secs", 30))
+        try:
+            ok, val, _ = self._bench_in(sib, "base")
+        except Exception as e:
+            self.log(event="batch-base-error", detail=str(e)[-200:])
+            return None
+        finally:
+            cool_down(getattr(self.a, "cooldown_secs", 30))
+        if ok and val is not None:
+            self.log(event="batch-base", val=val)
+            return val
+        self.log(event="batch-base-unparsed")
+        return None
+
+    def median_bench(self, n, k=3):
+        """Up to k bench runs, verdict on the median (hashyy: single
+        configs on a noisy box swing +-20%; median-of-3 kills outliers).
+        Unparsed runs drop out; zero parsed returns (None, []).
+        Logs bench-median with the runs for forensics."""
+        runs = []
+        for _ in range(k):
+            try:
+                ok, v, bout = self.bench()
+            except Exception as e:
+                self.log(event="bench-flake", pr=n, detail=str(e)[-300:])
+                continue
+            if ok and v is not None:
+                runs.append(v)
+            else:
+                self.log(event="bench-unparsed", pr=n, detail=str(bout)[-300:])
+        if not runs:
+            return None, []
+        val = sorted(runs)[len(runs) // 2]
+        self.log(event="bench-median", pr=n, runs=runs, median=val)
+        return val, runs
 
     def qual_generation(self):
         """Deterministic generation fingerprint of the current tree: fixed
@@ -1007,31 +1075,6 @@ class Lab:
         self.quarantine(n, reason, detail[-2000:])
         return False
 
-    def maybe_confirm_bench(self, n, intent, base, val):
-        """One confirmation run when val is a boundary measurement.
-
-        Returns (val, runs): the verdict value (mean of both runs when
-        confirmed) and the run list for forensics. A flaked confirmation
-        keeps the first run — extra data only overrides when collected.
-        """
-        runs = [val]
-        if not needs_confirm(intent, base, val, self.a.regression_pct,
-                             getattr(self.a, "bench_noise_pct", 5.0)):
-            return val, runs
-        self.log(event="bench-confirm", pr=n, first=val, base=base)
-        try:
-            ok2, val2, bout2 = self.bench()
-        except Exception as e:
-            self.log(event="bench-confirm-flake", pr=n, detail=str(e)[-300:])
-            return val, runs
-        if ok2 and val2 is not None:
-            val = (val + val2) / 2
-            runs.append(val2)
-            self.log(event="bench-confirmed", pr=n, runs=runs, mean=val)
-        else:
-            self.log(event="bench-confirm-flake", pr=n, detail=str(bout2)[-300:])
-        return val, runs
-
     def run_gates(self, n, intent):
         """Build/smoke/ppl/bench gates for one merged commit.
 
@@ -1070,26 +1113,20 @@ class Lab:
             return False
         if self.a.bench_model and self.a.regression_pct > 0 and \
            os.path.exists(os.path.expanduser(self.a.bench_model)):
-            try:
-                okbench, val, bout = self.bench()
-            except Exception as e:
+            # Verdict on the median of 3 (same heat state, outliers dead).
+            val, runs = self.median_bench(n)
+            if val is None:
                 self.log(event="bench-failed", pr=n,
-                         detail=f"bench-{gate_error_reason(e)}: {str(e)[-800:]}")
-                self.record_merged(n)
-                self.log(event="merged-unverified-perf", pr=n,
-                         total=len(self.state["merged"]))
-                return True
-            if not okbench or val is None:
-                self.log(event="bench-failed", pr=n,
-                         detail=bout[-1000:])
+                         detail="all median runs unparsed; keeping merge unverified")
                 # bench infra flake (OOM/timeout/parse): do NOT punish
                 # the PR, but record the merge without a perf verdict.
                 self.record_merged(n)
                 self.log(event="merged-unverified-perf", pr=n,
                          total=len(self.state["merged"]))
                 return True
-            base = self.state.get("bench_baseline")
-            val, runs = self.maybe_confirm_bench(n, intent, base, val)
+            # Reference: this batch's interleaved base when fresh, else
+            # the stored baseline. Same-hour numbers beat same-campaign.
+            base = self.state.get("batch_base") or self.state.get("bench_baseline")
             verdict = verdict_for(intent, base, val, self.a.regression_pct)
             amb = sample_ambient()  # box snapshot with the verdict: MHz +
             br = self.state.setdefault("bench_results", {})  # VRAM pin down
@@ -1411,20 +1448,18 @@ class Lab:
             if self.a.bench_model and (self.a.regression_pct or 0) > 0 and \
                os.path.exists(os.path.expanduser(self.a.bench_model)) and \
                self.state.get("bench_baseline"):
+                # Same median-of-3 discipline as per-PR gates: a boundary
+                # final reading must not revert a culprit on one noisy
+                # number.
                 try:
-                    okbench, val, bout = self.bench()
+                    val, runs = self.median_bench("final")
                 except Exception as e:
                     self.log(event="final-bench-flake", detail=str(e)[-500:])
                     return ("healed" if steps else "unverified"), "bench infra flake"
-                if not okbench or val is None:
-                    self.log(event="final-bench-flake", detail=str(bout)[-1000:])
+                if val is None:
+                    self.log(event="final-bench-flake", detail="median runs unparsed")
                     return ("healed" if steps else "unverified"), "bench unparsed"
                 base = self.state["bench_baseline"]
-                # Same noise guard as per-PR gates: a boundary final reading
-                # must not revert a culprit on one noisy number. Intent is
-                # empty here — only the regression side can trigger, which
-                # is exactly this gate's guilty verdict.
-                val, runs = self.maybe_confirm_bench("final", {}, base, val)
                 if val < base * (1 - self.a.regression_pct / 100):
                     culprit = remaining.pop()
                     self.revert_last()
@@ -1503,6 +1538,17 @@ class Lab:
                 i += self.a.batch
                 continue
             self.log(event="batch-start", prs=batch)
+            # Interleaved control: bench the clean base in its worktree so
+            # this batch judges against same-hour numbers, not a stale
+            # baseline from a different heat state. Absent worktree falls
+            # back to bench_baseline inside run_gates.
+            try:
+                bb = self.interleave_base()
+            except Exception as e:
+                bb = None
+                self.log(event="batch-base-error", detail=str(e)[-200:])
+            self.state["batch_base"] = bb
+            self.save()
             batch_files = set()
             for n in batch:
                 if done >= self.a.max_prs or self._stop:

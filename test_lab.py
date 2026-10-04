@@ -180,7 +180,7 @@ except Exception as e:
     check("sample-load", False, str(e))
 
 # 11. intent classification (proves the right thing per PR kind)
-from pr_intent import classify_intent, verdict_for
+from pr_intent import classify_intent, needs_confirm, verdict_for
 cuda_perf = {"number": 1, "title": "CUDA: faster TOP_K kernel", "labels": ["ggml", "cuda"],
              "files": ["ggml/src/ggml-cuda/top-k.cu"]}
 i = classify_intent(cuda_perf)
@@ -700,17 +700,17 @@ with tempfile.TemporaryDirectory() as td:
 
 # 40. boundary bench verdicts get one confirmation run (noise guard)
 _g = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": True}
-check("confirm-reg-boundary", M.needs_confirm(_g, 100, 83, 15, 5.0) is True)
-check("confirm-reg-clear", M.needs_confirm(_g, 100, 70, 15, 5.0) is False)
-check("confirm-imp-boundary", M.needs_confirm(_g, 100, 118, 15, 5.0) is True)
-check("confirm-imp-clear", M.needs_confirm(_g, 100, 130, 15, 5.0) is False)
-check("confirm-gainline-below", M.needs_confirm(_g, 100, 112, 15, 5.0) is True)
+check("confirm-reg-boundary", needs_confirm(_g, 100, 83, 15, 5.0) is True)
+check("confirm-reg-clear", needs_confirm(_g, 100, 70, 15, 5.0) is False)
+check("confirm-imp-boundary", needs_confirm(_g, 100, 118, 15, 5.0) is True)
+check("confirm-imp-clear", needs_confirm(_g, 100, 130, 15, 5.0) is False)
+check("confirm-gainline-below", needs_confirm(_g, 100, 112, 15, 5.0) is True)
 check("confirm-parity-far-noexpect-rollback-stands",
-      M.needs_confirm(_g, 100, 100, 15, 5.0) is False)
+      needs_confirm(_g, 100, 100, 15, 5.0) is False)
 _nox = {"area": "perf", "backends": ["cuda"], "expects_bench_gain": False}
-check("confirm-noexpect-above", M.needs_confirm(_nox, 100, 118, 15, 5.0) is False)
-check("confirm-disabled", M.needs_confirm(_g, 100, 88, 15, 0) is False)
-check("confirm-nobase", M.needs_confirm(_g, 0, 88, 15, 5.0) is False)
+check("confirm-noexpect-above", needs_confirm(_nox, 100, 118, 15, 5.0) is False)
+check("confirm-disabled", needs_confirm(_g, 100, 88, 15, 0) is False)
+check("confirm-nobase", needs_confirm(_g, 0, 88, 15, 5.0) is False)
 
 def _scripted(vals):
     vals = list(vals)
@@ -752,11 +752,11 @@ with tempfile.TemporaryDirectory() as td:
     repo, sd = _confirmrepo(td)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
     lab = _confirmlab(sd, model, repo)
-    lab.bench = _scripted([33.5, 40.0])  # boundary regression, then clean
+    lab.bench = _scripted([33.5, 40.0])  # boundary outlier, then clean
     intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
-    check("confirm-saves-noisy-pr", lab.run_gates(77, intent) is True)
-    check("confirm-mean-stored",
-          lab.state["bench_results"]["77"]["runs"] == [33.5, 40.0]
+    check("median-saves-noisy-pr", lab.run_gates(77, intent) is True)
+    check("median-runs-stored",
+          lab.state["bench_results"]["77"]["runs"] == [33.5, 40.0, 40.0]
           and lab.state["bench_results"]["77"]["verdict"] == "parity",
           str(lab.state["bench_results"].get("77")))
 
@@ -764,10 +764,10 @@ with tempfile.TemporaryDirectory() as td:
     repo, sd = _confirmrepo(td)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
     lab = _confirmlab(sd, model, repo)
-    lab.bench = _scripted([30.0, 31.0])  # real regression, twice
+    lab.bench = _scripted([30.0, 31.0])  # real regression, thrice
     intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
-    check("confirm-upholds-real", lab.run_gates(77, intent) is False)
-    check("confirm-real-quarantined",
+    check("median-upholds-real", lab.run_gates(77, intent) is False)
+    check("median-real-quarantined",
           any(q["pr"] == 77 and q["reason"] == "perf-regression" for q in lab.quar),
           str(lab.quar))
 
@@ -781,12 +781,12 @@ with tempfile.TemporaryDirectory() as td:
         return (True, 33.5, "first") if calls["n"] == 1 else (False, None, "flaked")
     lab.bench = _flake
     intent = {"area": "perf", "backends": ["cpu"], "expects_bench_gain": False}
-    check("confirm-flake-keeps-first", lab.run_gates(77, intent) is False)
-    check("confirm-flake-runs",
+    check("median-flake-keeps-first", lab.run_gates(77, intent) is False)
+    check("median-flake-runs",
           lab.state["bench_results"]["77"]["runs"] == [33.5],
           str(lab.state["bench_results"].get("77")))
 
-# 41. final-verify confirms boundary readings before reverting a culprit
+# 41. final-verify medians boundary readings before reverting a culprit
 with tempfile.TemporaryDirectory() as td:
     repo, sd = _confirmrepo(td)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
@@ -794,21 +794,21 @@ with tempfile.TemporaryDirectory() as td:
     lab.bench = _scripted([33.5, 40.0])  # boundary, then clean: noise, not guilt
     lab.state["merged"] = [71, 72]
     st, _ = lab.final_verify_and_heal([71, 72])
-    check("final-confirm-saves", st == "clean", st)
-    check("final-confirm-no-revert", lab.state["merged"] == [71, 72],
+    check("final-median-saves", st == "clean", st)
+    check("final-median-no-revert", lab.state["merged"] == [71, 72],
           str(lab.state["merged"]))
 
 with tempfile.TemporaryDirectory() as td:
     repo, sd = _confirmrepo(td)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
     lab = _confirmlab(sd, model, repo)
-    lab.bench = _scripted([30.0, 31.0])  # real regression, twice
+    lab.bench = _scripted([30.0, 31.0])  # real regression, thrice
     lab.state["merged"] = [71, 72]
     st, _ = lab.final_verify_and_heal([72])
-    check("final-confirm-upholds", st == "healed", st)
-    check("final-confirm-reverts", lab.state["merged"] == [71],
+    check("final-median-upholds", st == "healed", st)
+    check("final-median-reverts", lab.state["merged"] == [71],
           str(lab.state["merged"]))
-    check("final-confirm-runs",
+    check("final-median-runs",
           any("runs=" in q.get("detail", "") for q in lab.quar
               if q.get("reason") == "late-regression"),
           str(lab.quar))
@@ -1323,6 +1323,23 @@ with tempfile.TemporaryDirectory() as td:
           and lab.state.get("bench_baseline_runs") == [40.0, 44.0, 44.0],
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
 
+# 42b. median verdict + interleaved base fallback
+with tempfile.TemporaryDirectory() as td:
+    sd = os.path.join(td, "st"); os.makedirs(sd)
+    model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
+    lab = _baselab(sd, model)
+    lab.a.cooldown_secs = 0
+    vals = [33.5, 40.0, 40.0]
+    lab.bench = lambda: (True, vals.pop(0), "out")
+    v, runs = lab.median_bench(7)
+    check("median-picks-middle", v == 40.0 and runs == [33.5, 40.0, 40.0],
+          f"{v} {runs}")
+    lab.bench = lambda: (True, None, "unparsed")
+    v, runs = lab.median_bench(8)
+    check("median-all-unparsed", v is None and runs == [])
+    check("base-worktree-absent", lab.base_worktree() is None)
+    check("interleave-absent", lab.interleave_base() is None)
+
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
@@ -1730,8 +1747,8 @@ try:
               str([(c["number"], c.get("error")) for c in _part55]))
 finally:
     sys.argv, F.req, F.time.sleep = _argv55, _req55, _sleep55
-check("confirm-none-intent-reg", M.needs_confirm(None, 100, 83, 15, 5.0) is True)
-check("confirm-none-intent-above", M.needs_confirm(None, 100, 118, 15, 5.0) is False)
+check("confirm-none-intent-reg", needs_confirm(None, 100, 83, 15, 5.0) is True)
+check("confirm-none-intent-above", needs_confirm(None, 100, 118, 15, 5.0) is False)
 with tempfile.TemporaryDirectory() as td55b:
     sd55b = os.path.join(td55b, "st"); os.makedirs(sd55b)
     a55b = _mklab(os.path.join(td55b, "norepo"), sd55b, [{"number": 1}])
