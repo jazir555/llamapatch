@@ -1717,7 +1717,7 @@ def main():
     ap.add_argument("--bench-noise-pct", type=float, default=5.0,
                     help="boundary bench verdicts within this %% of their threshold "
                     "line get one confirmation run (verdict on the mean); 0 disables")
-    ap.add_argument("--cooldown-secs", type=float, default=30.0,
+    ap.add_argument("--cooldown-secs", type=float, default=60.0,
                     help="settle sleep after every bench so back-to-back 7B runs "
                     "don't heat-soak the box into false regressions; 0 disables")
     ap.add_argument("--skip-ci-red", dest="skip_ci_red", action="store_true", default=True)
