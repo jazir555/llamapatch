@@ -66,6 +66,24 @@ check("qual-keeps-text", M.generated_hash(_text_out) != M.generated_hash("Hello 
 check("qual-stable", M.generated_hash(_text_out) == M.generated_hash(_text_out))
 check("qual-empty", M.generated_hash("") == M.generated_hash(None))
 
+# spill_suspect: needs 1.3x model in free VRAM; unknowns never suspect
+check("spill-tight", M.spill_suspect(5000, 4_677_120_000))
+check("spill-roomy", not M.spill_suspect(9000, 4_677_120_000))
+check("spill-unknown", not M.spill_suspect(None, 100) and not M.spill_suspect(100, None))
+check("spill-garbage", not M.spill_suspect("x", "y"))
+
+# bench_config: stable string, flips on flag changes that alter numbers
+class _A: pass
+_a = _A(); _a.pp = 32; _a.tg = 32; _a.bench_model = "m"; _a.cuda_bench = False
+_b = _A(); _b.pp = 32; _b.tg = 64; _b.bench_model = "m"; _b.cuda_bench = False
+_c = _A(); _c.pp = 32; _c.tg = 32; _c.bench_model = "m"; _c.cuda_bench = True
+check("benchcfg-stable", M.bench_config(_a) == M.bench_config(_a))
+check("benchcfg-tg", M.bench_config(_a) != M.bench_config(_b))
+check("benchcfg-cuda", M.bench_config(_a) != M.bench_config(_c))
+
+# sample_ambient: always a dict, never raises
+check("ambient-dict", isinstance(M.sample_ambient(), dict))
+
 # retry_ripe: unripe stamps wait, missing/garbage/ripe pass
 check("ripe-missing", M.retry_ripe(None) and M.retry_ripe(""))
 check("ripe-garbage", M.retry_ripe("soon", now=100.0))
@@ -471,11 +489,11 @@ with tempfile.TemporaryDirectory() as td:
           lab.state["bench_baseline"] == 42.0 and lab.state["bench_baseline_sha"] == "abc123",
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_sha")}))
     lab.ensure_baseline()
-    check("baseline-cached", calls == {"build": 1, "bench": 2}, str(calls))
+    check("baseline-cached", calls == {"build": 1, "bench": 3}, str(calls))
     lab.state["base_sha"] = "def456"
     lab.ensure_baseline()
     check("baseline-rebuilt",
-          calls == {"build": 2, "bench": 4} and lab.state["bench_baseline_sha"] == "def456",
+          calls == {"build": 2, "bench": 6} and lab.state["bench_baseline_sha"] == "def456",
           f"{calls} {lab.state.get('bench_baseline_sha')}")
 
 with tempfile.TemporaryDirectory() as td:
@@ -501,7 +519,7 @@ with tempfile.TemporaryDirectory() as td:
     check("baseline-unparsed-sha",
           lab.state["bench_baseline"] is None and lab.state["bench_baseline_sha"] == "abc123")
     lab.ensure_baseline()
-    check("baseline-unparsed-no-loop", n == {"bench": 2}, str(n))
+    check("baseline-unparsed-no-loop", n == {"bench": 3}, str(n))
 
 # 18. clean start after kills (dirty tracked files must not fake conflicts)
 with tempfile.TemporaryDirectory() as td:
@@ -1207,7 +1225,7 @@ with tempfile.TemporaryDirectory() as td:
     _git(repo, "checkout", base)
     lab.ensure_baseline()
     check("baseline-clean-head",
-          calls == {"build": 1, "bench": 2} and lab.state["bench_baseline"] == 99.0,
+          calls == {"build": 1, "bench": 3} and lab.state["bench_baseline"] == 99.0,
           f"{calls} {lab.state.get('bench_baseline')}")
 
 # 34. report surfaces post-run heals (caught AFTER merges, not at merge time)
@@ -1290,7 +1308,7 @@ with tempfile.TemporaryDirectory() as td:
     ok2, reason2 = lab2.merge_one_committed(5, "batch-0")
     check("current-fallback-merges", ok2, str(reason2))
 
-# 42. baseline anchors on the mean of two runs (one number, 50 verdicts)
+# 42. baseline anchors on the median of three runs (one number, 50 verdicts)
 with tempfile.TemporaryDirectory() as td:
     sd = os.path.join(td, "st"); os.makedirs(sd)
     model = os.path.join(td, "m.gguf"); open(model, "w").write("x")
@@ -1300,9 +1318,9 @@ with tempfile.TemporaryDirectory() as td:
     vals = [40.0, 44.0]
     lab.bench = lambda: (True, vals.pop(0) if vals else 44.0, "out")
     lab.ensure_baseline()
-    check("baseline-mean",
-          lab.state["bench_baseline"] == 42.0
-          and lab.state.get("bench_baseline_runs") == [40.0, 44.0],
+    check("baseline-median",
+          lab.state["bench_baseline"] == 44.0
+          and lab.state.get("bench_baseline_runs") == [40.0, 44.0, 44.0],
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
 
 with tempfile.TemporaryDirectory() as td:

@@ -378,6 +378,61 @@ def generated_hash(out):
         keep.append(s)
     return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:16]
 
+
+def sample_ambient():
+    """Best-effort box snapshot for bench forensics: CPU MHz (throttle
+    witness) and NVIDIA VRAM used/total (spill-cliff witness). Read-only,
+    never raises; {} when the probes are absent. Recorded with every
+    bench verdict so mysteries like Oct 2026's 5.9 -> 3.0 sag can be
+    diagnosed after the fact instead of guessed at."""
+    info = {}
+    try:
+        with open("/proc/cpuinfo") as f:
+            mhz = [float(m.group(1)) for m in
+                   re.finditer(r"cpu MHz\s*:\s*([\d.]+)", f.read())]
+        if mhz:
+            info["cpu_mhz"] = round(sum(mhz) / len(mhz), 1)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run("nvidia-smi --query-gpu=memory.used,memory.total "
+                           "--format=csv,noheader,nounits", shell=True, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=15)
+        parts = (r.stdout or "").strip().split(",")
+        if len(parts) >= 2:
+            info["vram_used_mb"] = int(float(parts[0].strip()))
+            info["vram_total_mb"] = int(float(parts[1].strip()))
+    except Exception:
+        pass
+    return info
+
+
+def spill_suspect(vram_free_mb, model_bytes, factor=1.3):
+    """Pure VRAM-cliff decision (hashyy: the driver silently spills to
+    system RAM over PCIe past the cliff — 8x slower with no error, so any
+    bench measured over the edge is garbage, not a verdict). True when
+    free VRAM can't hold factor * model bytes. None/unknown inputs never
+    suspect (don't punish what we can't see)."""
+    try:
+        if vram_free_mb is None or model_bytes is None:
+            return False
+        return float(vram_free_mb) < float(model_bytes) / 1e6 * float(factor)
+    except (TypeError, ValueError):
+        return False
+
+
+def bench_config(a):
+    """Bench identity string: any change here invalidates the stored
+    baseline (different flags measure different things). Compared in
+    ensure_baseline so flag edits auto-trigger a re-baseline instead of
+    silently judging new numbers against an old reference."""
+    return "|".join([
+        str(getattr(a, "pp", 32)), str(getattr(a, "tg", 32)),
+        str(getattr(a, "bench_model", "")),
+        "cuda" if getattr(a, "cuda_bench", False) else "cpu",
+    ])
+
 def sh(cmd, cwd, check=False, capture=True, timeout=1800):
     exe = "/bin/bash" if os.path.exists("/bin/bash") else None
     r = subprocess.run(cmd, cwd=cwd, shell=True, text=True, executable=exe,
@@ -669,6 +724,21 @@ class Lab:
         cool_down(getattr(self.a, "cooldown_secs", 30))
         bench = os.path.join(self.repo, "build", "bin", "llama-bench")
         model = os.path.expanduser(self.a.bench_model)
+        if getattr(self.a, "cuda_bench", False):
+            # VRAM-cliff guard: benching over the spill edge measures the
+            # PCIe fallback, not the PR. Refuse before burning heat.
+            amb = sample_ambient()
+            used = amb.get("vram_used_mb")
+            total = amb.get("vram_total_mb")
+            free = (total - used) if used is not None and total else None
+            try:
+                mbytes = os.path.getsize(model) if model else None
+            except OSError:
+                mbytes = None
+            if spill_suspect(free, mbytes):
+                detail = f"vram free {free}MB < 1.3x model; cliff-suspect, bench refused"
+                self.log(event="vram-cliff-refused", detail=detail, ambient=amb)
+                return False, None, detail
         rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -300", self.repo)
         val = parse_bench_output(out)
         try:
@@ -1021,9 +1091,10 @@ class Lab:
             base = self.state.get("bench_baseline")
             val, runs = self.maybe_confirm_bench(n, intent, base, val)
             verdict = verdict_for(intent, base, val, self.a.regression_pct)
-            br = self.state.setdefault("bench_results", {})
-            br[str(n)] = {"tg": val, "base": base, "verdict": verdict,
-                          "runs": runs,
+            amb = sample_ambient()  # box snapshot with the verdict: MHz +
+            br = self.state.setdefault("bench_results", {})  # VRAM pin down
+            br[str(n)] = {"tg": val, "base": base, "verdict": verdict,  # the conditions
+                          "runs": runs, "ambient": amb,  # behind every number
                           "area": intent.get("area"),
                           "backends": intent.get("backends"),
                           "expects_gain": intent.get("expects_bench_gain")}
@@ -1031,7 +1102,8 @@ class Lab:
             if verdict == "regression":
                 self.revert_last()
                 self.log(event="regression", pr=n, val=val, base=base,
-                         area=intent.get("area"), backends=intent.get("backends"))
+                         area=intent.get("area"), backends=intent.get("backends"),
+                         ambient=amb)
                 self.quarantine(n, "perf-regression", f"{val} vs {base}")
                 self._hot_streak.append(n)
                 if hot_box_tripped(self._hot_streak):
@@ -1060,7 +1132,8 @@ class Lab:
             self._hot_streak = []  # parity/improvement: box is sane
             if verdict == "improvement":
                 self.log(event="improvement", pr=n, val=val, base=base,
-                         area=intent.get("area"), backends=intent.get("backends"))
+                         area=intent.get("area"), backends=intent.get("backends"),
+                         ambient=amb)
                 # Qual gate: a wrong-bytes bug runs FASTER, so a claimed
                 # gain must prove byte-identical generation to the base.
                 # No base hash (old state, missing binary) skips, never
@@ -1104,7 +1177,8 @@ class Lab:
                 # why, don't punish.
                 self.log(event="parity", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"),
-                         expects_gain=intent.get("expects_bench_gain"))
+                         expects_gain=intent.get("expects_bench_gain"),
+                         ambient=amb)
         self.record_merged(n)
         self.log(event="merged", pr=n, total=len(self.state["merged"]),
                  area=intent.get("area"), backends=intent.get("backends"))
@@ -1125,16 +1199,25 @@ class Lab:
         a machine for false perf-regressions. Defer loudly instead; gates
         fall back to unverified, never to wrong numbers.
 
-        Anchors on the mean of two runs: every verdict of the campaign (up
-        to 50 merges) compares against this one number, so halving its
-        noise is worth one extra bench per base change. A flaked second
-        run keeps the first; --bench-noise-pct 0 restores a single run.
+        Anchors on the median of three runs: every verdict of the campaign
+        (up to 50 merges) compares against this one number, and hashyy's
+        harness work shows single configs on a noisy box swing wildly —
+        median-of-3 costs one extra bench per base change and kills
+        outliers. A flaked majority keeps whatever ran.
         """
         if not self.a.bench_model or (self.a.regression_pct or 0) <= 0:
             return
         if self.state.get("bench_baseline_sha") is not None and \
-            self.state.get("bench_baseline_sha") == self.state.get("base_sha"):
+            self.state.get("bench_baseline_sha") == self.state.get("base_sha") and \
+            self.state.get("bench_config") == bench_config(self.a):
             return
+        if self.state.get("bench_baseline_sha") == self.state.get("base_sha") and \
+            self.state.get("bench_config") != bench_config(self.a):
+            print(f"bench flags changed ({self.state.get('bench_config')} -> "
+                  f"{bench_config(self.a)}), re-baselining", flush=True)
+            self.log(event="baseline-config-changed",
+                     old=self.state.get("bench_config"),
+                     new=bench_config(self.a))
         model = os.path.expanduser(self.a.bench_model)
         if not (os.path.exists(model) or os.path.exists(model + ".1")):
             print("bench model absent, skipping baseline bench", flush=True)
@@ -1160,7 +1243,7 @@ class Lab:
             return
         self._build_ok = True  # clean base built: toolchain proven for this run
         runs, last_bout = [], ""
-        attempts = 2 if getattr(self.a, "bench_noise_pct", 5.0) else 1
+        attempts = 3 if getattr(self.a, "bench_noise_pct", 5.0) else 1
         for _ in range(attempts):
             try:
                 okb, val, bout = self.bench()
@@ -1171,9 +1254,10 @@ class Lab:
                 runs.append(val)
             else:
                 last_bout = bout
-        val = sum(runs) / len(runs) if runs else None
+        val = sorted(runs)[len(runs) // 2] if runs else None
         self.state["bench_baseline"] = val
         self.state["bench_baseline_sha"] = self.state.get("base_sha")
+        self.state["bench_config"] = bench_config(self.a)
         if runs:
             self.state["bench_baseline_runs"] = runs
         print(f"baseline bench tg: {val} runs={runs}", flush=True)
@@ -1577,6 +1661,10 @@ def main():
                     help="max post-run final-verify reverts before stopping loudly")
     ap.add_argument("--smoke-model", default="~/llama-pr-lab/models/tinyllama.gguf")
     ap.add_argument("--bench-model", default="~/llama-pr-lab/models/qwen2.5-7b-00001-of-00002.gguf")
+    ap.add_argument("--cuda-bench", action="store_true",
+                    help="bench on GPU: refuse the run when free VRAM can't hold "
+                    "1.3x the model (driver spill over the cliff measures PCIe, "
+                    "not the PR)")
     ap.add_argument("--pp", type=int, default=32)
     ap.add_argument("--tg", type=int, default=32)
     ap.add_argument("--regression-pct", type=float, default=15.0)

@@ -285,10 +285,10 @@ with tempfile.TemporaryDirectory() as td:
     check("ci-flip-clean", lab2.state["quarantined"] == [],
           str(lab2.state["quarantined"]))
 
-# Scenario 5: noise guard end to end. Baseline anchors on the mean of two
-# runs; a boundary per-PR reading earns one confirmation run through the
-# real run() loop instead of a noisy revert. Scripted bench values are
-# consumed in order: 2 baseline + 2 gate (boundary, clean) + final-verify.
+# Scenario 5: noise guard end to end. Baseline anchors on the median of
+# three runs; a boundary per-PR reading earns one confirmation run through
+# the real run() loop instead of a noisy revert. Scripted bench values are
+# consumed in order: 3 baseline + 2 gate (boundary, clean) + final-verify.
 with tempfile.TemporaryDirectory() as td:
     repo = os.path.join(td, "repo")
     statedir = os.path.join(td, "state")
@@ -311,7 +311,7 @@ with tempfile.TemporaryDirectory() as td:
     lab.a.regression_pct = 15
     lab.build = lambda: (True, "mock build ok")
     lab.smoke = lambda: (True, "tg32 : 40 t/s mock")
-    vals = [40.0, 40.0, 33.5, 40.0]
+    vals = [40.0, 40.0, 40.0, 33.5, 40.0]
     def _seq():
         v = vals.pop(0) if len(vals) > 1 else vals[0]
         return (True, v, f"v={v}")
@@ -321,7 +321,7 @@ with tempfile.TemporaryDirectory() as td:
           str(lab.state["merged"]))
     check("confirm-e2e-base-mean",
           lab.state["bench_baseline"] == 40.0
-          and lab.state.get("bench_baseline_runs") == [40.0, 40.0],
+          and lab.state.get("bench_baseline_runs") == [40.0, 40.0, 40.0],
           str({k: lab.state.get(k) for k in ("bench_baseline", "bench_baseline_runs")}))
     br = lab.state.get("bench_results", {}).get("401", {})
     check("confirm-e2e-runs", br.get("runs") == [33.5, 40.0]
