@@ -45,6 +45,31 @@ check("hotbox-no-2", not M.hot_box_tripped([1, 2]))
 check("hotbox-no-empty", not M.hot_box_tripped([]))
 check("hotbox-no-nolist", not M.hot_box_tripped(None))
 
+# stale-lock self-heal: dead pid is not alive, self is alive
+check("pid-self-alive", M.pid_alive(os.getpid()))
+check("pid-dead", not M.pid_alive(999999999))
+check("pid-zero", not M.pid_alive(0))
+check("pid-neg", not M.pid_alive(-5))
+check("pid-str", not M.pid_alive("1234"))
+check("pid-none", not M.pid_alive(None))
+
+# acquire_lock: steals dead-pid locks, refuses live ones
+_d = tempfile.mkdtemp()
+json.dump({"pid": 999999999, "ts": "x"}, open(os.path.join(_d, "lab.lock"), "w"))
+try:
+    M.acquire_lock(_d)
+    check("lock-steals-dead", True)
+    M.release_lock(_d)
+except Exception as e:
+    check("lock-steals-dead", False, str(e)[:100])
+json.dump({"pid": os.getpid(), "ts": "x"}, open(os.path.join(_d, "lab.lock"), "w"))
+try:
+    M.acquire_lock(_d)
+    check("lock-refuses-live", False, "stole a live lock")
+except RuntimeError:
+    check("lock-refuses-live", True)
+M.release_lock(_d)
+
 # 2. smoke verdict
 check("smoke-tg", M.smoke_ok(0, "tg32 : 42 t/s"))
 check("smoke-throughput", M.smoke_ok(0, "throughput 160 t/s"))

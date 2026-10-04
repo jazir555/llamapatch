@@ -176,23 +176,64 @@ def atomic_write_json(path, obj):
     os.replace(tmp, path)
 
 
+def pid_alive(pid):
+    """Pure liveness probe: True if a process with this pid exists.
+    EPERM (no permission to signal) means alive; ESRCH means dead.
+    Non-integer / non-positive pids are never alive."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def acquire_lock(state_dir):
     """Fail-fast mutual exclusion for one state-dir.
 
     Two concurrent runs (cron + manual, two shells) sharing lab-state.json
     would interleave merges/quarantines and corrupt state. The lock file
-    holds pid+timestamp for forensics. Stale locks (killed run) must be
-    removed by the operator after verifying no run is active — never
-    auto-stolen, since stealing risks the corruption this prevents.
+    holds pid+timestamp for forensics.
+
+    Stale locks self-heal: a SIGTERM/SIGKILL leaves the file behind with
+    a dead pid (Oct 2026: a stopped background run blocked the resume for
+    30 idle minutes). When the recorded pid is gone the lock is removed
+    and the run proceeds; a LIVE pid still refuses (never auto-steal from
+    a running loop), as does an unreadable lock (possible concurrent
+    starter mid-write — re-read once after a beat, then refuse).
+    --force-unlock remains for the alive-but-stuck case.
     """
     lp = lock_path(state_dir)
     try:
         fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        raise RuntimeError(
-            f"lab lock exists: {lp} — another run may be active; "
-            f"remove it only after verifying no merge loop is running "
-            f"(or re-run with --force-unlock once verified)")
+        info = None
+        for _ in range(2):
+            try:
+                with open(lp) as f:
+                    info = json.load(f)
+                break
+            except Exception:
+                time.sleep(1)
+        pid = info.get("pid") if isinstance(info, dict) else None
+        if pid is not None and not pid_alive(pid):
+            try:
+                os.remove(lp)
+            except FileNotFoundError:
+                pass
+            print(f"stale lab lock removed (pid {pid} gone), proceeding",
+                  flush=True)
+            fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        else:
+            raise RuntimeError(
+                f"lab lock exists: {lp} — another run may be active; "
+                f"remove it only after verifying no merge loop is running "
+                f"(or re-run with --force-unlock once verified)")
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps({"pid": os.getpid(),
                             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat()}))
