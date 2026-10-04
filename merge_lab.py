@@ -642,6 +642,10 @@ class Lab:
         # Writes last-bench.txt for forensics; caller decides pass/fail.
         # tail -300 (not -80): new-schema rows carry samples_* arrays and
         # run ~60 lines each; a short tail cut the list's opening bracket.
+        # Settle BEFORE benching: the preceding -j2 build heat-soaks the
+        # box and the bench would otherwise measure the build's heat, not
+        # the PR (Oct 2026: cool box re-throttled 6 minutes after resume).
+        cool_down(getattr(self.a, "cooldown_secs", 30))
         bench = os.path.join(self.repo, "build", "bin", "llama-bench")
         model = os.path.expanduser(self.a.bench_model)
         rc, out = sh(f"set -o pipefail; timeout 600 '{bench}' -m '{model}' -p {self.a.pp} -n {self.a.tg} -o json 2>&1 | tail -300", self.repo)
