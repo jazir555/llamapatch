@@ -38,6 +38,13 @@ check("bench-samples-log-prefix",
 check("bench-samples-alt-key",
       M.parse_bench_output('[{"n_gen":32,"avg_throughput":19.5,"samples_ts":[19.1]}]') == 19.5)
 
+# hot-box guard: 3 straight regressions trips, fewer do not
+check("hotbox-trip", M.hot_box_tripped([1, 2, 3]))
+check("hotbox-trip-4", M.hot_box_tripped([1, 2, 3, 4]))
+check("hotbox-no-2", not M.hot_box_tripped([1, 2]))
+check("hotbox-no-empty", not M.hot_box_tripped([]))
+check("hotbox-no-nolist", not M.hot_box_tripped(None))
+
 # 2. smoke verdict
 check("smoke-tg", M.smoke_ok(0, "tg32 : 42 t/s"))
 check("smoke-throughput", M.smoke_ok(0, "throughput 160 t/s"))

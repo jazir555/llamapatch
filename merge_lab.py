@@ -119,6 +119,15 @@ def should_skip_ci(cand, skip_flag):
     return bool(skip_flag) and (cand or {}).get("ci_state") in ("failure", "error")
 
 
+def hot_box_tripped(streak, limit=3):
+    """Pure hot-box decision: `limit` consecutive perf-regression verdicts
+    in one run means the box (not the PRs) is sick — thermal throttling
+    shows exactly this signature (Oct 2026: 25 straight false regressions
+    as bench values sagged 5.9 -> 2.9 over 40 hot minutes). Trip: stop
+    the run and requeue the streak instead of quarantining it."""
+    return isinstance(streak, list) and len(streak) >= limit
+
+
 def sanitize_merge_msg(n, title):
     """Shell-safe one-line merge message. Strips newlines/quotes/`$`."""
     clean = re.sub(r"[\r\n'\x60$\"\\;|&<>!()]+", " ", title or "")
@@ -348,6 +357,16 @@ class Lab:
         self.doctor_warnings = []
         self._smoke_green = False
         self._build_ok = False
+        self._hot_streak = []  # consecutive perf-regression PRs this run
+        self._stop = False  # hot-box trip or operator stop pauses the loop
+
+    def unquarantine(self, n):
+        """Release one PR back to pending (retry on a later run)."""
+        if n in self.state["quarantined"]:
+            self.state["quarantined"].remove(n)
+        self.quar = [q for q in self.quar
+                     if not (isinstance(q, dict) and q.get("pr") == n)]
+        self.save()
 
     def save(self):
         # Quarantine file FIRST: a kill between the two writes must leave
@@ -902,7 +921,23 @@ class Lab:
                 self.log(event="regression", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"))
                 self.quarantine(n, "perf-regression", f"{val} vs {base}")
+                self._hot_streak.append(n)
+                if hot_box_tripped(self._hot_streak):
+                    # The box is hot, not the PRs: requeue the whole
+                    # streak for a cool retry and pause the run instead
+                    # of burning the queue on false verdicts.
+                    for m in self._hot_streak:
+                        self.unquarantine(m)
+                    self.log(event="hot-box",
+                             detail=f"paused after {len(self._hot_streak)} "
+                                    f"straight regressions; requeued {self._hot_streak}")
+                    print(f"HOT-BOX paused: {len(self._hot_streak)} straight "
+                          f"regressions look thermal; requeued {self._hot_streak} "
+                          f"for a cool retry", flush=True)
+                    self._hot_streak = []
+                    self._stop = True
                 return False
+            self._hot_streak = []  # parity/improvement: box is sane
             if verdict == "improvement":
                 self.log(event="improvement", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"))
@@ -1221,7 +1256,7 @@ class Lab:
         done = 0
         i = 0
         cand_by_num = {c["number"]: c for c in self.cands}
-        while i < len(pending) and done < self.a.max_prs:
+        while i < len(pending) and done < self.a.max_prs and not self._stop:
             batch = [n for n in pending[i:i+self.a.batch]
                      if n not in self.state["quarantined"]]
             if not batch:
@@ -1230,7 +1265,7 @@ class Lab:
             self.log(event="batch-start", prs=batch)
             batch_files = set()
             for n in batch:
-                if done >= self.a.max_prs:
+                if done >= self.a.max_prs or self._stop:
                     break
                 # CI gate: skip red PRs before paying for a build (annotated
                 # by fetch_prs.py --include-ci; override with --no-skip-ci-red).
@@ -1285,8 +1320,10 @@ class Lab:
         # Post-run gate: per-PR gates pass at merge time, but interactions
         # can regress the tree AFTER merges. Verify the final tree and
         # self-heal (revert + quarantine culprits) before reporting DONE.
+        # Skipped after a hot-box pause: the tree was reverted to the last
+        # good state and the box needs cooling, not another bench.
         new_merges = [n for n in self.state["merged"] if n not in merged_before]
-        if new_merges:
+        if new_merges and not self._stop:
             status, detail = self.final_verify_and_heal(new_merges)
             self.log(event="final-verify", status=status, detail=str(detail)[:300])
             print(f"FINAL {status}: {detail}", flush=True)
@@ -1296,6 +1333,8 @@ class Lab:
                          detail=str(idetail)[:300])
                 print(f"IMPROVEMENTS {istatus}: {idetail}", flush=True)
         print(f"DONE merged={self.state['merged']} quarantined={len(self.state['quarantined'])}", flush=True)
+        if self._stop:
+            print("PAUSED hot-box: cool the box, then re-run to resume", flush=True)
 
     def doctor(self):
         """Reconcile state files vs repo. Drops phantom 'merged' entries whose
