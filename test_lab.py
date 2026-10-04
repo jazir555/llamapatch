@@ -58,6 +58,14 @@ _t0 = __import__("time").perf_counter()
 M.cool_down(0); M.cool_down(None); M.cool_down(-5); M.cool_down("xx")
 check("cooldown-noop", __import__("time").perf_counter() - _t0 < 5)
 
+# generated_hash: stats stripped, text kept, stable, sensitive
+_stat_out = "Hello world\nllama_print_timings: 12.3 tok/s\nload time: 5 ms\n"
+_text_out = "Hello world\nand more text\n"
+check("qual-strips-stats", M.generated_hash(_stat_out) == M.generated_hash("Hello world\n"))
+check("qual-keeps-text", M.generated_hash(_text_out) != M.generated_hash("Hello world\n"))
+check("qual-stable", M.generated_hash(_text_out) == M.generated_hash(_text_out))
+check("qual-empty", M.generated_hash("") == M.generated_hash(None))
+
 # retry_ripe: unripe stamps wait, missing/garbage/ripe pass
 check("ripe-missing", M.retry_ripe(None) and M.retry_ripe(""))
 check("ripe-garbage", M.retry_ripe("soon", now=100.0))

@@ -26,7 +26,7 @@ Interaction failures (A+B fail but each passes alone) are logged as
 batch-overlap-warn for manual review — pairs are never retried (avoids
 combinatorial explosion across 1k PRs).
 """
-import argparse, json, os, re, subprocess, time, datetime
+import argparse, hashlib, json, os, re, subprocess, time, datetime
 
 try:
     from pr_intent import classify_intent, needs_confirm, verdict_for
@@ -357,6 +357,27 @@ def smoke_ok(rc, out):
     """Pure smoke verdict: rc 0 + any throughput token."""
     return rc == 0 and bool(re.search(r"(tg\d+|throughput|tok/s|avg_ts)", out))
 
+
+QUAL_PROMPT = "Hello, my name is"
+QUAL_SEED = 42
+
+
+def generated_hash(out):
+    """Pure qual fingerprint: sha16 of generation output with timing/stat
+    lines stripped. A wrong-bytes bug runs FASTER, not slower (hashyy:
+    corrupted routing collapsed onto a handful of experts at 48 tok/s) —
+    so every claimed `improvement` must prove byte-identical output to
+    the base before it stays merged."""
+    keep = []
+    for line in (out or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if re.search(r"(tok/s|t/s|ms per|ms/token|eval time|load time|total time|prompt eval|generation time|llama_.*\.log|build:|commit:)", s, re.I):
+            continue
+        keep.append(s)
+    return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:16]
+
 def sh(cmd, cwd, check=False, capture=True, timeout=1800):
     exe = "/bin/bash" if os.path.exists("/bin/bash") else None
     r = subprocess.run(cmd, cwd=cwd, shell=True, text=True, executable=exe,
@@ -657,6 +678,22 @@ class Lab:
             pass
         cool_down(getattr(self.a, "cooldown_secs", 30))
         return rc == 0, val, out
+
+    def qual_generation(self):
+        """Deterministic generation fingerprint of the current tree: fixed
+        prompt, fixed seed, temp 0 on the tiny smoke model. Returns the
+        generated_hash or None when the binary/model is missing. Seconds,
+        not minutes — cheap enough to gate every claimed improvement."""
+        cli = os.path.join(self.repo, "build", "bin", "llama-cli")
+        model = os.path.expanduser(getattr(self.a, "smoke_model", ""))
+        if not os.path.exists(cli) or not model or not os.path.exists(model):
+            return None
+        rc, out = sh(f"set -o pipefail; timeout 300 '{cli}' -m '{model}' "
+                     f"-p '{QUAL_PROMPT}' -n 20 --seed {QUAL_SEED} -t 2 "
+                     f"--temp 0 2>&1 | tail -30", self.repo)
+        if rc != 0:
+            return None
+        return generated_hash(out)
 
     def quarantine(self, n, reason, detail=""):
         # Dedupe identical (pr, reason) rows: transient requeue/retry cycles
@@ -1024,6 +1061,32 @@ class Lab:
             if verdict == "improvement":
                 self.log(event="improvement", pr=n, val=val, base=base,
                          area=intent.get("area"), backends=intent.get("backends"))
+                # Qual gate: a wrong-bytes bug runs FASTER, so a claimed
+                # gain must prove byte-identical generation to the base.
+                # No base hash (old state, missing binary) skips, never
+                # punishes; a mismatch reverts + quarantines qual-failed.
+                want = self.state.get("qual_baseline")
+                if want and self.state.get("qual_baseline_sha") == self.state.get("base_sha"):
+                    try:
+                        got = self.qual_generation()
+                    except Exception as e:
+                        got = None
+                        self.log(event="qual-error", pr=n, detail=str(e)[-200:])
+                    if got is None:
+                        self.log(event="qual-skipped", pr=n,
+                                 detail="generation failed; keeping gated improvement")
+                    elif got != want:
+                        self.revert_last()
+                        self.log(event="qual-mismatch", pr=n,
+                                 detail=f"gen {got} != base {want}")
+                        self.quarantine(n, "qual-failed",
+                                        f"faster but different output ({got} != {want})")
+                        return False
+                    else:
+                        self.log(event="qual-match", pr=n, detail=got)
+                else:
+                    self.log(event="qual-skipped", pr=n,
+                             detail="no base generation hash; keeping gated improvement")
             elif verdict == "parity" and intent.get("expects_bench_gain") \
                     and base and val:
                 # Claimed a gain this box can measure, produced none:
@@ -1116,6 +1179,16 @@ class Lab:
         print(f"baseline bench tg: {val} runs={runs}", flush=True)
         if val is None:
             self.log(event="baseline-bench-unparsed", detail=str(last_bout)[-1000:])
+        try:
+            qh = self.qual_generation()
+        except Exception as e:
+            qh, qerr = None, str(e)[-200:]
+            self.log(event="baseline-qual-error", detail=qerr)
+        else:
+            qerr = ""
+        self.state["qual_baseline"] = qh
+        self.state["qual_baseline_sha"] = self.state.get("base_sha")
+        print(f"baseline qual hash: {qh or 'absent ' + qerr}", flush=True)
         self.save()
 
     def maybe_force_unlock(self):
